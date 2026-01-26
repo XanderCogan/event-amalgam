@@ -1,0 +1,16 @@
+{
+  "name": "sf-event-agg",
+  "version": "1.0.0",
+  "description": "Event aggregator for San Francisco Bay Area events",
+  "main": "build.js",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "node-fetch": "^2.7.0"
+  }
+}
