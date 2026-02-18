@@ -40,6 +40,21 @@ function parseDateString(dateStr) {
   return null;
 }
 
+// Current date in Pacific (America/Los_Angeles) for consistent filtering on Vercel (UTC) and local builds
+function getTodayPacificDateString() {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  });
+  const parts = formatter.formatToParts(new Date());
+  const year = parts.find(p => p.type === 'year').value;
+  const month = parts.find(p => p.type === 'month').value;
+  const day = parts.find(p => p.type === 'day').value;
+  return `${year}-${month}-${day}`;
+}
+
 // Parse 19hz.info events
 function parse19hz(html) {
   const $ = cheerio.load(html);
@@ -343,8 +358,7 @@ async function scrapePoshVip() {
     });
     
     const formattedEvents = [];
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const todayStr = getTodayPacificDateString();
     
     for (const event of uniqueEvents) {
       const dateStr = event.startUtc;
@@ -353,8 +367,7 @@ async function scrapePoshVip() {
       const date = parseDateString(dateStr);
       if (!date) continue;
       
-      const eventDate = new Date(date + 'T00:00:00');
-      if (eventDate < today) continue;
+      if (date < todayStr) continue;
       
       const startDate = new Date(dateStr);
       const hours = startDate.getHours();
@@ -390,7 +403,121 @@ async function scrapePoshVip() {
   }
 }
 
+// Electronic music keywords for Partiful category detection
+const ELECTRONIC_KEYWORDS = [
+  'electronic', 'dj', 'techno', 'house', 'edm', 'rave', 'drum and bass',
+  'dubstep', 'trance', 'drum & bass', 'd&b', 'dnb', 'breakbeat', 'ambient',
+  'idm', 'electro', 'disco house', 'deep house', 'tech house', 'minimal'
+];
 
+function detectPartifulCategory(title, details) {
+  const text = `${title || ''} ${details || ''}`.toLowerCase();
+  return ELECTRONIC_KEYWORDS.some(kw => text.includes(kw)) ? 'electronic' : 'live';
+}
+
+// Parse Partiful events from discover/sf page. Uses __NEXT_DATA__ in the HTML so we
+// never depend on a Next.js build ID (which changes on every Partiful deploy).
+const PARTIFUL_DISCOVER_URL = 'https://partiful.com/discover/sf';
+
+async function parsePartiful() {
+  const todayStr = getTodayPacificDateString();
+  const bayAreaCities = ['san francisco', 'sf', 'oakland', 'berkeley', 'san jose', 'bay area', 'emeryville'];
+
+  try {
+    const html = await fetchHTML(PARTIFUL_DISCOVER_URL);
+    if (!html) {
+      console.log('  Partiful: Failed to fetch discover page, skipping.');
+      return [];
+    }
+    const $ = cheerio.load(html);
+    const nextDataScript = $('#__NEXT_DATA__').html();
+    if (!nextDataScript) {
+      console.log('  Partiful: No __NEXT_DATA__ in page, skipping.');
+      return [];
+    }
+    const data = JSON.parse(nextDataScript);
+    const pp = data?.props?.pageProps;
+    if (!pp) {
+      console.log('  Partiful: No pageProps in response, skipping.');
+      return [];
+    }
+
+    // Collect event objects from feedItems and from each section's items (dedupe by id)
+    const seenIds = new Set();
+    const rawEvents = [];
+    for (const item of pp.feedItems || []) {
+      if (item?.event && !seenIds.has(item.event.id)) {
+        seenIds.add(item.event.id);
+        rawEvents.push(item.event);
+      }
+    }
+    for (const section of pp.sections || []) {
+      for (const item of section.items || []) {
+        if (item?.event && !seenIds.has(item.event.id)) {
+          seenIds.add(item.event.id);
+          rawEvents.push(item.event);
+        }
+      }
+    }
+
+    if (rawEvents.length === 0) {
+      console.log('  Partiful: No events in response, skipping.');
+      return [];
+    }
+
+    const events = [];
+    for (const e of rawEvents) {
+      const title = e.title ?? '';
+      const venue = e.locationInfo?.mapsInfo?.name ?? '';
+      const addressLines = e.locationInfo?.mapsInfo?.addressLines || e.locationInfo?.displayAddressLines || [];
+      const cityStr = (e.locationInfo?.mapsInfo?.approximateLocation || addressLines[addressLines.length - 1] || '').toString().toLowerCase();
+      const fullText = `${title} ${venue} ${e.description || ''}`.toLowerCase();
+
+      if (fullText.includes('21+') || fullText.includes('21 and over') || fullText.includes('(21+)') || fullText.includes('21 & up')) continue;
+      const inBayArea = bayAreaCities.some(c => cityStr.includes(c) || fullText.includes(c));
+      if (!inBayArea) continue;
+
+      const dateStr = e.startDate;
+      if (!dateStr) continue;
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) continue;
+      // Partiful stores UTC; format date and time in event timezone (America/Los_Angeles for discover/sf).
+      // Use formatToParts so we always get YYYY-MM-DD (toLocaleDateString format can vary by env and break filteredDates).
+      const tz = e.timezone || 'America/Los_Angeles';
+      const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d);
+      const get = (type) => (parts.find(p => p.type === type) || {}).value || '';
+      const date = `${get('year')}-${get('month')}-${get('day')}`;
+      if (date < todayStr) continue;
+
+      let time = '';
+      const timeParts = d.toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true });
+      if (timeParts) time = timeParts.replace(/\s/g, ' ').trim();
+
+      const details = (e.description || '').slice(0, 200);
+      const link = `https://partiful.com/e/${e.id}`;
+      const category = detectPartifulCategory(title, details);
+      const city = cityStr || null;
+
+      events.push({
+        date,
+        time,
+        source: 'partiful',
+        title: title || 'Event',
+        venue,
+        city,
+        details,
+        bands: [],
+        link,
+        category
+      });
+    }
+
+    return events;
+  } catch (error) {
+    console.log('  Partiful scraping skipped:', error.message);
+    return [];
+  }
+}
 
 // Wait helper (replaces deprecated page.waitForTimeout in Puppeteer 22+)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -587,9 +714,19 @@ async function build() {
   // Fetch posh.vip events (API-based, no Puppeteer)
   const poshEvents = await scrapePoshVip();
   console.log(`Parsed ${poshEvents.length} events from posh.vip`);
+
+  // Fetch Partiful events (graceful if API unavailable)
+  console.log('Fetching events from Partiful...');
+  let partifulEvents = [];
+  try {
+    partifulEvents = await parsePartiful();
+    console.log(`Parsed ${partifulEvents.length} events from Partiful`);
+  } catch (err) {
+    console.log('Partiful skipped:', err.message);
+  }
   
   // Combine and group by date
-  const allEvents = [...events19hz, ...foopeeEvents, ...poshEvents];
+  const allEvents = [...events19hz, ...foopeeEvents, ...poshEvents, ...partifulEvents];
   
   // Group by date
   const eventsByDate = {};
@@ -619,8 +756,19 @@ async function build() {
   console.log(`\nBuild complete! Generated index.html with ${allEvents.length} events across ${sortedDates.length} dates.`);
 }
 
+// Return comma-separated genre tags for an event (multi-genre support)
+function getGenres(event) {
+  if (event.source === '19hz') return 'electronic,edm,raves';
+  if (event.source === 'foopee') return 'punk,rock';
+  // Partiful, Posh, etc.: use category when present
+  const cat = (event.category || '').toLowerCase();
+  if (cat === 'electronic') return 'electronic,edm,raves';
+  return 'punk,rock';
+}
+
 // Generate HTML output
 function generateHTML(eventsByDate, sortedDates) {
+  const todayStr = getTodayPacificDateString();
   let html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -801,12 +949,78 @@ function generateHTML(eventsByDate, sortedDates) {
             border-color: var(--acid-green);
         }
 
+        .primary-filters {
+            margin-bottom: 16px;
+        }
+
+        /* Genre chips (secondary filter) */
+        .genre-filters {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 40px;
+            flex-wrap: wrap;
+            animation: slideDown 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.25s backwards;
+        }
+
+        .genre-label {
+            font-family: 'Azeret Mono', monospace;
+            font-size: 0.75rem;
+            letter-spacing: 0.15em;
+            color: var(--concrete);
+            text-transform: uppercase;
+        }
+
+        .genre-chip {
+            font-family: 'Azeret Mono', monospace;
+            background: transparent;
+            border: 1px solid var(--concrete);
+            color: var(--white);
+            padding: 6px 14px;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.08em;
+            transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .genre-chip::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: var(--electric-blue);
+            transition: left 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: -1;
+        }
+
+        .genre-chip:hover::before,
+        .genre-chip.active::before {
+            left: 0;
+        }
+
+        .genre-chip:hover,
+        .genre-chip.active {
+            color: var(--deep-black);
+            border-color: var(--electric-blue);
+        }
+
         /* Events grid */
         .events-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
             gap: 20px;
             margin-bottom: 60px;
+        }
+
+        .event-card-link {
+            text-decoration: none;
+            color: inherit;
+            display: block;
         }
 
         .event-card {
@@ -1021,19 +1235,28 @@ function generateHTML(eventsByDate, sortedDates) {
         }
     </style>
 </head>
-<body>
+<body data-today="${todayStr}">
     <div class="container">
         <header>
             <h1>SF MUSIC EVENTS</h1>
             <div class="subtitle">Bay Area // All Ages // Live Aggregation</div>
         </header>
 
-        <div class="filters">
-            <button class="filter-btn active" data-filter="all">All Events</button>
-            <button class="filter-btn" data-filter="tonight">Tonight</button>
-            <button class="filter-btn" data-filter="weekend">This Weekend</button>
-            <button class="filter-btn" data-filter="electronic">Electronic</button>
-            <button class="filter-btn" data-filter="live">Live Music</button>
+        <!-- Primary time filters -->
+        <div class="filters primary-filters">
+            <button class="filter-btn" data-time-filter="tonight">Tonight</button>
+            <button class="filter-btn" data-time-filter="weekend">This Weekend</button>
+            <button class="filter-btn active" data-time-filter="all">All Events</button>
+        </div>
+
+        <!-- Secondary genre filters -->
+        <div class="genre-filters">
+            <span class="genre-label">FILTER BY:</span>
+            <button class="genre-chip active" data-genre-filter="all">All</button>
+            <button class="genre-chip" data-genre-filter="electronic">Electronic</button>
+            <button class="genre-chip" data-genre-filter="punk">Punk/Rock</button>
+            <button class="genre-chip" data-genre-filter="raves">Raves</button>
+            <button class="genre-chip" data-genre-filter="edm">EDM</button>
         </div>
 
         <div class="events-grid" id="eventsGrid">
@@ -1047,46 +1270,63 @@ function generateHTML(eventsByDate, sortedDates) {
     </div>
 
     <script>
-        // Remove past events on page load
         document.addEventListener('DOMContentLoaded', function() {
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
+            const timeFilterBtns = document.querySelectorAll('.filter-btn[data-time-filter]');
+            const genreChipBtns = document.querySelectorAll('.genre-chip');
+            const eventCards = document.querySelectorAll('.event-card');
+            const todayStr = document.body.dataset.today || '';
 
-            document.querySelectorAll('.event-card').forEach(card => {
-                const eventDateStr = card.dataset.eventDate;
-                if (eventDateStr) {
-                    const eventDate = new Date(eventDateStr + 'T00:00:00');
-                    if (eventDate < today) {
-                        card.remove(); // Actually remove from DOM
+            function isWeekend(dateStr) {
+                var d = new Date(dateStr + 'T00:00:00');
+                var day = d.getDay();
+                return day === 0 || day === 6;
+            }
+
+            function matchesTime(card, timeFilter) {
+                if (timeFilter === 'all') return true;
+                var dateStr = card.dataset.eventDate || '';
+                if (timeFilter === 'tonight') return dateStr === todayStr;
+                if (timeFilter === 'weekend') return isWeekend(dateStr);
+                return true;
+            }
+
+            function matchesGenre(card, genreFilter) {
+                if (genreFilter === 'all') return true;
+                var genres = (card.dataset.genres || '').split(',').map(function(g) { return g.trim().toLowerCase(); });
+                return genres.indexOf(genreFilter.toLowerCase()) !== -1;
+            }
+
+            function applyFilters() {
+                var timeFilter = document.querySelector('.filter-btn.active[data-time-filter]');
+                var genreFilter = document.querySelector('.genre-chip.active');
+                var timeVal = timeFilter ? timeFilter.dataset.timeFilter : 'all';
+                var genreVal = genreFilter ? genreFilter.dataset.genreFilter : 'all';
+
+                eventCards.forEach(function(card) {
+                    var show = matchesTime(card, timeVal) && matchesGenre(card, genreVal);
+                    var el = card.closest('.event-card-link') || card;
+                    el.style.display = show ? 'block' : 'none';
+                    if (show) {
+                        card.style.animation = 'none';
+                        card.offsetHeight;
+                        card.style.animation = '';
                     }
-                }
+                });
+            }
+
+            timeFilterBtns.forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    timeFilterBtns.forEach(function(b) { b.classList.remove('active'); });
+                    btn.classList.add('active');
+                    applyFilters();
+                });
             });
 
-            // Filter functionality
-            const filterBtns = document.querySelectorAll('.filter-btn');
-            const eventCards = document.querySelectorAll('.event-card');
-
-            filterBtns.forEach(btn => {
-                btn.addEventListener('click', () => {
-                    // Update active state
-                    filterBtns.forEach(b => b.classList.remove('active'));
+            genreChipBtns.forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    genreChipBtns.forEach(function(b) { b.classList.remove('active'); });
                     btn.classList.add('active');
-
-                    const filter = btn.dataset.filter;
-
-                    // Filter events
-                    eventCards.forEach(card => {
-                        if (filter === 'all' || card.dataset.category === filter) {
-                            card.style.display = 'block';
-                            // Re-trigger animation
-                            card.style.animation = 'none';
-                            setTimeout(() => {
-                                card.style.animation = '';
-                            }, 10);
-                        } else {
-                            card.style.display = 'none';
-                        }
-                    });
+                    applyFilters();
                 });
             });
 
@@ -1111,11 +1351,7 @@ function generateHTML(eventsByDate, sortedDates) {
 </html>
 `;
 
-  // Generate event cards from scraped data
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  
+  // Generate event cards from scraped data (use Pacific date so Vercel UTC build matches local)
   const filteredDates = sortedDates.filter(date => {
     return date >= todayStr;  // Show today and FUTURE dates
   });
@@ -1130,26 +1366,22 @@ function generateHTML(eventsByDate, sortedDates) {
       const dayAbbr = dateObj.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
       
       eventsByDate[date].forEach(event => {
-        const category = event.source === '19hz' ? 'electronic' : 'live';
+        const genres = getGenres(event);
         const venueDisplay = event.city ? `${event.venue}, ${event.city}` : event.venue;
-        
-        cardsHtml += `            <div class="event-card" data-category="${category}" data-event-date="${date}">\n`;
-        cardsHtml += `                <div class="event-header">\n`;
-        cardsHtml += `                    <div>\n`;
-        cardsHtml += `                        <div class="event-date">${dayNum}</div>\n`;
-        cardsHtml += `                        <div class="event-day">${dayAbbr}</div>\n`;
-        cardsHtml += `                    </div>\n`;
-        if (event.time) {
-          cardsHtml += `                    <div class="event-time">${escapeHtml(event.time)}</div>\n`;
-        }
-        cardsHtml += `                </div>\n`;
-        cardsHtml += `                <div class="event-body">\n`;
-        cardsHtml += `                    <div class="event-title">${escapeHtml(event.title)}</div>\n`;
-        if (event.venue) {
-          cardsHtml += `                    <div class="event-venue">${escapeHtml(venueDisplay)}</div>\n`;
-        }
-        cardsHtml += `                </div>\n`;
-        cardsHtml += `            </div>\n\n`;
+        const cardContent = `                <div class="event-header">\n` +
+          `                    <div>\n` +
+          `                        <div class="event-date">${dayNum}</div>\n` +
+          `                        <div class="event-day">${dayAbbr}</div>\n` +
+          `                    </div>\n` +
+          (event.time ? `                    <div class="event-time">${escapeHtml(event.time)}</div>\n` : '') +
+          `                </div>\n` +
+          `                <div class="event-body">\n` +
+          `                    <div class="event-title">${escapeHtml(event.title)}</div>\n` +
+          (event.venue ? `                    <div class="event-venue">${escapeHtml(venueDisplay)}</div>\n` : '') +
+          `                </div>\n`;
+        const openWrap = event.link ? `            <a href="${escapeHtml(event.link)}" target="_blank" rel="noopener noreferrer" class="event-card-link">\n` : '';
+        const closeWrap = event.link ? `            </a>\n` : '';
+        cardsHtml += openWrap + `            <div class="event-card" data-genres="${escapeHtml(genres)}" data-event-date="${date}">\n` + cardContent + `            </div>\n` + closeWrap + '\n';
       });
     });
   }
