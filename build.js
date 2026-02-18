@@ -2,6 +2,7 @@ const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const fs = require('fs');
 const puppeteer = require('puppeteer');
+const { classifyAllEvents } = require('./classify-events');
 
 // Fetch HTML from a URL
 async function fetchHTML(url) {
@@ -727,7 +728,10 @@ async function build() {
   
   // Combine and group by date
   const allEvents = [...events19hz, ...foopeeEvents, ...poshEvents, ...partifulEvents];
-  
+
+  // AI genre classification
+  await classifyAllEvents(allEvents);
+
   // Group by date
   const eventsByDate = {};
   allEvents.forEach(event => {
@@ -758,12 +762,14 @@ async function build() {
 
 // Return comma-separated genre tags for an event (multi-genre support)
 function getGenres(event) {
-  if (event.source === '19hz') return 'electronic,edm,raves';
+  // If AI classified it, use that
+  if (event.aiGenres) return event.aiGenres;
+  // Fallback: source-based (only hits if API key missing or classification failed)
+  if (event.source === '19hz') return 'edm,raves';
   if (event.source === 'foopee') return 'punk,rock';
-  // Partiful, Posh, etc.: use category when present
   const cat = (event.category || '').toLowerCase();
-  if (cat === 'electronic') return 'electronic,edm,raves';
-  return 'punk,rock';
+  if (cat === 'electronic') return 'edm,raves';
+  return 'misc';
 }
 
 // Generate HTML output
@@ -1253,10 +1259,11 @@ function generateHTML(eventsByDate, sortedDates) {
         <div class="genre-filters">
             <span class="genre-label">FILTER BY:</span>
             <button class="genre-chip active" data-genre-filter="all">All</button>
-            <button class="genre-chip" data-genre-filter="electronic">Electronic</button>
-            <button class="genre-chip" data-genre-filter="punk">Punk/Rock</button>
-            <button class="genre-chip" data-genre-filter="raves">Raves</button>
             <button class="genre-chip" data-genre-filter="edm">EDM</button>
+            <button class="genre-chip" data-genre-filter="punk">Punk</button>
+            <button class="genre-chip" data-genre-filter="rock">Rock</button>
+            <button class="genre-chip" data-genre-filter="raves">Raves</button>
+            <button class="genre-chip" data-genre-filter="misc">Misc</button>
         </div>
 
         <div class="events-grid" id="eventsGrid">
