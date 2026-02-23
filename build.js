@@ -1,3 +1,4 @@
+require('dotenv').config();
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const fs = require('fs');
@@ -54,6 +55,38 @@ function getTodayPacificDateString() {
   const month = parts.find(p => p.type === 'month').value;
   const day = parts.find(p => p.type === 'day').value;
   return `${year}-${month}-${day}`;
+}
+
+/**
+ * Nightlife convention: events between midnight and 5:59am belong to the previous night.
+ * Given a date string "2026-02-20" and a time like "5:00 AM", returns "2026-02-19".
+ * Returns the original date if time is missing, unparseable, or >= 6am.
+ */
+function adjustForAfterMidnight(dateStr, timeStr) {
+  if (!dateStr || !timeStr) return dateStr;
+
+  // Parse the time string to extract hour and AM/PM
+  const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(am|pm)/i);
+  if (!match) return dateStr;
+
+  let hour = parseInt(match[1], 10);
+  const ampm = match[3].toLowerCase();
+
+  // Convert to 24h
+  if (ampm === 'am' && hour === 12) hour = 0;
+  if (ampm === 'pm' && hour !== 12) hour += 12;
+
+  // If between midnight (0:00) and 5:59am, roll back one day
+  if (hour < 6) {
+    const d = new Date(dateStr + 'T12:00:00'); // noon to avoid TZ edge cases
+    d.setDate(d.getDate() - 1);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  return dateStr;
 }
 
 // Parse 19hz.info events
@@ -732,6 +765,11 @@ async function build() {
   // AI genre classification
   await classifyAllEvents(allEvents);
 
+  // After-midnight rollback: events 12am–5:59am belong to the previous night
+  allEvents.forEach(event => {
+    event.date = adjustForAfterMidnight(event.date, event.time);
+  });
+
   // Group by date
   const eventsByDate = {};
   allEvents.forEach(event => {
@@ -760,8 +798,18 @@ async function build() {
   console.log(`\nBuild complete! Generated index.html with ${allEvents.length} events across ${sortedDates.length} dates.`);
 }
 
+// Known club venues: always show as Clubs (edm) regardless of cache/AI
+const KNOWN_CLUB_VENUES = ['dna lounge', 'public works', 'monarch', 'the midway', '1015 folsom'];
+function isKnownClub(venue) {
+  if (!venue || typeof venue !== 'string') return false;
+  const v = venue.trim().toLowerCase();
+  return KNOWN_CLUB_VENUES.some(club => v === club || v.includes(club));
+}
+
 // Return comma-separated genre tags for an event (multi-genre support)
 function getGenres(event) {
+  // Known clubs always = Clubs (edm) so DNA Lounge etc. are correct even when cache/AI is wrong
+  if (isKnownClub(event.venue)) return 'edm';
   // If AI classified it, use that
   if (event.aiGenres) return event.aiGenres;
   // Fallback: source-based (only hits if API key missing or classification failed)
@@ -780,7 +828,8 @@ function generateHTML(eventsByDate, sortedDates) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SF MUSIC EVENTS</title>
+    <title>BAYMOVES.NOW</title>
+    <link rel="icon" type="image/png" href="baymovesLogo1.png">
     <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Azeret+Mono:wght@400;600&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -1023,6 +1072,17 @@ function generateHTML(eventsByDate, sortedDates) {
             margin-bottom: 60px;
         }
 
+        .no-events,
+        .no-events-filtered {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 48px 24px;
+            color: var(--electric-blue);
+            font-size: 1.1rem;
+            border: 1px dashed var(--concrete);
+            border-radius: 8px;
+        }
+
         .event-card-link {
             text-decoration: none;
             color: inherit;
@@ -1244,7 +1304,7 @@ function generateHTML(eventsByDate, sortedDates) {
 <body data-today="${todayStr}">
     <div class="container">
         <header>
-            <h1>SF MUSIC EVENTS</h1>
+            <h1>BAYMOVES.NOW (-slutty tyler durden)</h1>
             <div class="subtitle">Bay Area // All Ages // Live Aggregation</div>
         </header>
 
@@ -1259,7 +1319,7 @@ function generateHTML(eventsByDate, sortedDates) {
         <div class="genre-filters">
             <span class="genre-label">FILTER BY:</span>
             <button class="genre-chip active" data-genre-filter="all">All</button>
-            <button class="genre-chip" data-genre-filter="edm">EDM</button>
+            <button class="genre-chip" data-genre-filter="edm">Clubs</button>
             <button class="genre-chip" data-genre-filter="punk">Punk</button>
             <button class="genre-chip" data-genre-filter="rock">Rock</button>
             <button class="genre-chip" data-genre-filter="raves">Raves</button>
@@ -1267,6 +1327,7 @@ function generateHTML(eventsByDate, sortedDates) {
         </div>
 
         <div class="events-grid" id="eventsGrid">
+            <div class="no-events-filtered" id="noEventsFiltered" style="display: none;">No events found</div>
             <!--EVENT_CARDS_PLACEHOLDER-->
         </div>
     </div>
@@ -1283,17 +1344,40 @@ function generateHTML(eventsByDate, sortedDates) {
             const eventCards = document.querySelectorAll('.event-card');
             const todayStr = document.body.dataset.today || '';
 
-            function isWeekend(dateStr) {
-                var d = new Date(dateStr + 'T00:00:00');
+            function getThisWeekendDateSet(todayStr) {
+                if (!todayStr) return {};
+                var d = new Date(todayStr + 'T00:00:00');
                 var day = d.getDay();
-                return day === 0 || day === 6;
+                var fridayOffset;
+                if (day <= 4) fridayOffset = 5 - day;
+                else if (day === 5) fridayOffset = 0;
+                else if (day === 6) fridayOffset = -1;
+                else fridayOffset = -2;
+                var friday = new Date(d);
+                friday.setDate(friday.getDate() + fridayOffset);
+                var saturday = new Date(friday);
+                saturday.setDate(saturday.getDate() + 1);
+                var sunday = new Date(friday);
+                sunday.setDate(sunday.getDate() + 2);
+                function toStr(date) {
+                    var y = date.getFullYear(), m = date.getMonth() + 1, dayNum = date.getDate();
+                    return y + '-' + (m < 10 ? '0' + m : m) + '-' + (dayNum < 10 ? '0' + dayNum : dayNum);
+                }
+                var set = {};
+                var friStr = toStr(friday), satStr = toStr(saturday), sunStr = toStr(sunday);
+                if (friStr >= todayStr) set[friStr] = true;
+                if (satStr >= todayStr) set[satStr] = true;
+                if (sunStr >= todayStr) set[sunStr] = true;
+                return set;
             }
+
+            var thisWeekendDates = getThisWeekendDateSet(todayStr);
 
             function matchesTime(card, timeFilter) {
                 if (timeFilter === 'all') return true;
                 var dateStr = card.dataset.eventDate || '';
                 if (timeFilter === 'tonight') return dateStr === todayStr;
-                if (timeFilter === 'weekend') return isWeekend(dateStr);
+                if (timeFilter === 'weekend') return thisWeekendDates[dateStr] === true;
                 return true;
             }
 
@@ -1309,8 +1393,10 @@ function generateHTML(eventsByDate, sortedDates) {
                 var timeVal = timeFilter ? timeFilter.dataset.timeFilter : 'all';
                 var genreVal = genreFilter ? genreFilter.dataset.genreFilter : 'all';
 
+                var visibleCount = 0;
                 eventCards.forEach(function(card) {
                     var show = matchesTime(card, timeVal) && matchesGenre(card, genreVal);
+                    if (show) visibleCount++;
                     var el = card.closest('.event-card-link') || card;
                     el.style.display = show ? 'block' : 'none';
                     if (show) {
@@ -1319,6 +1405,11 @@ function generateHTML(eventsByDate, sortedDates) {
                         card.style.animation = '';
                     }
                 });
+
+                var noEventsEl = document.getElementById('noEventsFiltered');
+                if (noEventsEl) {
+                    noEventsEl.style.display = (eventCards.length > 0 && visibleCount === 0) ? 'block' : 'none';
+                }
             }
 
             timeFilterBtns.forEach(function(btn) {
@@ -1365,7 +1456,7 @@ function generateHTML(eventsByDate, sortedDates) {
 
   let cardsHtml = '';
   if (filteredDates.length === 0) {
-    cardsHtml = '            <div class="no-events">No events found.</div>\n';
+    cardsHtml = '            <div class="no-events">No events to display</div>\n';
   } else {
     filteredDates.forEach(date => {
       const dateObj = new Date(date + 'T00:00:00');
