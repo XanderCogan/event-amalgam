@@ -794,7 +794,21 @@ async function build() {
   
   // Generate HTML
   generateHTML(eventsByDate, sortedDates);
-  
+
+  const allEventsList = sortedDates.flatMap(date =>
+    (eventsByDate[date] || []).map(event => {
+      const dateObj = new Date(date + 'T12:00:00');
+      return {
+        ...event,
+        date: date,
+        dayNum: String(dateObj.getDate()).padStart(2, '0'),
+        dayAbbr: dateObj.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase(),
+      };
+    })
+  );
+  generateEventPages(allEventsList);
+  await generateOGImages(allEventsList);
+
   console.log(`\nBuild complete! Generated index.html with ${allEvents.length} events across ${sortedDates.length} dates.`);
 }
 
@@ -820,6 +834,167 @@ function getGenres(event) {
   return 'misc';
 }
 
+const GENRE_COLORS = {
+  edm:        { c: '#00f0ff', dim: '#003840', label: 'EDM' },
+  raves:      { c: '#e040fb', dim: '#3a0042', label: 'RAVE' },
+  punk:       { c: '#ff2d2d', dim: '#400000', label: 'PUNK' },
+  rock:       { c: '#ff8a00', dim: '#3d2000', label: 'ROCK' },
+  misc:       { c: '#ccff00', dim: '#2a3300', label: 'MISC' },
+  electronic: { c: '#00f0ff', dim: '#003840', label: 'EDM' },
+};
+
+function getPrimaryGenre(event) {
+  const genres = getGenres(event).split(',').map(g => g.trim().toLowerCase());
+  for (const g of ['raves', 'edm', 'electronic', 'punk', 'rock']) {
+    if (genres.includes(g)) return g;
+  }
+  return 'misc';
+}
+
+async function generateOGImages(allEvents) {
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  const page = await browser.newPage();
+  page.setDefaultNavigationTimeout(60000);
+  await page.setViewport({ width: 1200, height: 630 });
+
+  const dir = 'og-images';
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  const template = fs.readFileSync('og-template.html', 'utf8');
+
+  for (const event of allEvents) {
+    const slug = generateSlug(event);
+    const genre = getPrimaryGenre(event);
+    const gc = GENRE_COLORS[genre] || GENRE_COLORS.misc;
+    const free = (event.price || event.details || '').toUpperCase().includes('FREE');
+
+    const displayTitle = escapeHtml(event.title);
+    const tLen = displayTitle.length;
+    const titleSize = tLen <= 8 ? 120 : tLen <= 14 ? 100 : tLen <= 20 ? 82 : 66;
+    const genreTagSize = Math.round(titleSize * 0.7);
+
+    const priceText = event.price || event.details || '';
+    const pricePadding = free ? '8px 26px 8px 34px' : '6px 22px 6px 28px';
+    const priceBg = free ? gc.c : '#151518';
+    const priceColor = free ? '#000' : '#555';
+    const priceSize = free ? 26 : 20;
+    const priceSpacing = free ? '0.12em' : '0.06em';
+    const priceBorder = free ? '' : 'border:1px solid #222; border-right:none;';
+
+    const dateObj = new Date(event.date + 'T12:00:00');
+    const dayNum = String(dateObj.getDate()).padStart(2, '0');
+    const dayAbbr = dateObj.toLocaleDateString('en-US', { weekday: 'short' }).toUpperCase();
+
+    let html = template
+      .replace(/\{\{TITLE\}\}/g, displayTitle)
+      .replace(/\{\{TITLE_SIZE\}\}/g, String(titleSize))
+      .replace(/\{\{GENRE_TAG_SIZE\}\}/g, String(genreTagSize))
+      .replace(/\{\{GENRE_LABEL\}\}/g, gc.label)
+      .replace(/\{\{VENUE\}\}/g, escapeHtml(event.venue || ''))
+      .replace(/\{\{CITY\}\}/g, escapeHtml(event.city || ''))
+      .replace(/\{\{TIME\}\}/g, escapeHtml(event.time || ''))
+      .replace(/\{\{DAY_NUM\}\}/g, dayNum)
+      .replace(/\{\{DAY_ABBR\}\}/g, dayAbbr)
+      .replace(/\{\{GENRE_C\}\}/g, gc.c)
+      .replace(/\{\{GENRE_DIM\}\}/g, gc.dim)
+      .replace(/\{\{PRICE\}\}/g, escapeHtml(priceText))
+      .replace(/\{\{PRICE_PADDING\}\}/g, pricePadding)
+      .replace(/\{\{PRICE_BG\}\}/g, priceBg)
+      .replace(/\{\{PRICE_COLOR\}\}/g, priceColor)
+      .replace(/\{\{PRICE_SIZE\}\}/g, String(priceSize))
+      .replace(/\{\{PRICE_SPACING\}\}/g, priceSpacing)
+      .replace(/\{\{PRICE_BORDER\}\}/g, priceBorder);
+
+    await page.setContent(html, { waitUntil: 'load', timeout: 60000 });
+    await page.evaluateHandle('document.fonts.ready');
+    await page.screenshot({
+      path: `${dir}/${slug}.png`,
+      type: 'png',
+      clip: { x: 0, y: 0, width: 1200, height: 630 }
+    });
+  }
+
+  await browser.close();
+  console.log(`Generated ${allEvents.length} OG images in /og-images/`);
+}
+
+// Extract price string from event details (19hz stores price in details field)
+// Returns: "FREE", "$10", "$10–$20", or null
+function extractPrice(event) {
+  const details = (event.details || '').toLowerCase();
+
+  // Check for free
+  if (details.includes('free') || details.includes('no cover')) {
+    return 'FREE';
+  }
+
+  // Match price patterns: $10, $10-$20, $10–$20, $10/$20
+  const priceMatch = (event.details || '').match(/\$[\d]+(?:\s*[-–\/]\s*\$?[\d]+)?/);
+  if (priceMatch) {
+    // Normalize dashes to en-dash for display
+    return priceMatch[0].replace(/-/g, '–');
+  }
+
+  return null;
+}
+
+function generateSlug(event) {
+  const name = event.title.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 50);
+  return `${name}-${event.date}`;
+}
+
+function generateEventPages(allEvents) {
+  const dir = 'e';
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  allEvents.forEach(event => {
+    const slug = generateSlug(event);
+    const title = escapeHtml(event.title);
+    const venue = escapeHtml(event.venue || '');
+    const city = escapeHtml(event.city || '');
+    const time = escapeHtml(event.time || '');
+    const price = escapeHtml(event.price || event.details || '');
+    const desc = [venue, city, time, price].filter(Boolean).join(' · ');
+    const canonicalUrl = `https://baymoves.com/e/${slug}`;
+    const ogImage = `https://baymoves.com/og-images/${slug}.png`;
+    const redirect = (event.link || `/?event=${slug}`).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${title} — Bay Moves</title>
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="${canonicalUrl}">
+  <meta property="og:title" content="${title}">
+  <meta property="og:description" content="${desc}">
+  <meta property="og:image" content="${ogImage}">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="Bay Moves">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${title}">
+  <meta name="twitter:description" content="${desc}">
+  <meta name="twitter:image" content="${ogImage}">
+  <script>window.location.href = "${redirect}";</script>
+</head>
+<body></body>
+</html>`;
+
+    fs.writeFileSync(`${dir}/${slug}.html`, html, 'utf8');
+  });
+
+  console.log(`Generated ${allEvents.length} event pages in /e/`);
+}
+
 // Generate HTML output
 function generateHTML(eventsByDate, sortedDates) {
   const todayStr = getTodayPacificDateString();
@@ -828,8 +1003,31 @@ function generateHTML(eventsByDate, sortedDates) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BAYMOVES.NOW</title>
-    <link rel="icon" type="image/png" href="baymovesLogo1.png">
+    <title>Bay Moves – Bay Area Music Events, Raves, Shows & Nightlife</title>
+    <meta name="description" content="Find every rave, club night, punk show, and indie concert in San Francisco, Oakland, Berkeley, and San Jose. Updated daily. All ages welcome.">
+    <link rel="canonical" href="https://baymoves.now/" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Bay Moves – Bay Area Music Events & Nightlife" />
+    <meta property="og:description" content="Every rave, club night, punk show, and indie concert across the Bay Area. Updated daily." />
+    <meta property="og:url" content="https://baymoves.now/" />
+    <meta property="og:site_name" content="Bay Moves" />
+    <meta property="og:image" content="https://baymoves.now/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Bay Moves – Bay Area Music Events & Nightlife" />
+    <meta name="twitter:description" content="Every rave, club night, punk show, and indie concert across the Bay Area. Updated daily." />
+    <meta name="twitter:image" content="https://baymoves.now/og-image.png" />
+
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#0A0A0A" />
+    <link rel="icon" type="image/png" href="baymovesLogo1.png" />
+
+    <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Azeret+Mono:wght@400;600&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -1065,13 +1263,6 @@ function generateHTML(eventsByDate, sortedDates) {
         }
 
         /* Events grid */
-        .events-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-            gap: 20px;
-            margin-bottom: 60px;
-        }
-
         .no-events,
         .no-events-filtered {
             grid-column: 1 / -1;
@@ -1083,138 +1274,207 @@ function generateHTML(eventsByDate, sortedDates) {
             border-radius: 8px;
         }
 
+        /* ═══════════════════════════════════════════════
+           EVENT CARDS — "The Flyer" design
+           ═══════════════════════════════════════════════ */
+
         .event-card-link {
             text-decoration: none;
             color: inherit;
             display: block;
         }
 
-        .event-card {
-            border: 1px solid var(--concrete);
-            background: linear-gradient(135deg, rgba(26, 26, 26, 0.6) 0%, rgba(10, 10, 10, 0.9) 100%);
-            position: relative;
-            overflow: hidden;
-            animation: fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) backwards;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-        }
+        /* Genre accent colors — used for card borders, badges, hover glows */
+        .event-card[data-primary-genre="edm"]   { --genre-accent: #00f0ff; }
+        .event-card[data-primary-genre="raves"] { --genre-accent: #e040fb; }
+        .event-card[data-primary-genre="punk"]  { --genre-accent: #ff2d2d; }
+        .event-card[data-primary-genre="rock"]  { --genre-accent: #ff8a00; }
+        .event-card[data-primary-genre="misc"]  { --genre-accent: #ccff00; }
+        .event-card { --genre-accent: #ccff00; }
 
-        .event-card:nth-child(1) { animation-delay: 0.1s; }
-        .event-card:nth-child(2) { animation-delay: 0.15s; }
-        .event-card:nth-child(3) { animation-delay: 0.2s; }
-        .event-card:nth-child(4) { animation-delay: 0.25s; }
-        .event-card:nth-child(5) { animation-delay: 0.3s; }
-        .event-card:nth-child(6) { animation-delay: 0.35s; }
-        .event-card:nth-child(n+7) { animation-delay: 0.4s; }
+        .event-card {
+            position: relative;
+            background: #08080a;
+            overflow: hidden;
+            box-shadow: 0 0 0 1px #1a1a1a;
+            transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1),
+                        box-shadow 0.3s ease;
+            cursor: pointer;
+            animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+        }
+        .event-card:nth-child(1) { animation-delay: 0.05s; }
+        .event-card:nth-child(2) { animation-delay: 0.08s; }
+        .event-card:nth-child(3) { animation-delay: 0.11s; }
+        .event-card:nth-child(4) { animation-delay: 0.14s; }
+        .event-card:nth-child(5) { animation-delay: 0.17s; }
+        .event-card:nth-child(n+6) { animation-delay: 0.2s; }
 
         @keyframes fadeInUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .event-card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -100%;
-            width: 100%;
-            height: 2px;
-            background: linear-gradient(90deg, transparent, var(--acid-green), transparent);
-            transition: left 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        .event-card:hover::before {
-            left: 100%;
+            from { opacity: 0; transform: translateY(20px); }
+            to   { opacity: 1; transform: translateY(0); }
         }
 
         .event-card:hover {
-            border-color: var(--acid-green);
-            transform: translateY(-4px);
-            box-shadow: 0 10px 40px rgba(204, 255, 0, 0.1);
+            transform: translateY(-4px) scale(1.01);
+            box-shadow: 0 12px 40px color-mix(in srgb, var(--genre-accent) 12%, transparent),
+                        0 0 0 1px color-mix(in srgb, var(--genre-accent) 40%, transparent);
         }
 
-        .event-header {
-            padding: 20px;
-            border-bottom: 1px solid var(--concrete);
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
+        /* --- Genre color band (top edge) --- */
+        .card-genre-bar {
+            height: 4px;
+            background: linear-gradient(90deg, var(--genre-accent), color-mix(in srgb, var(--genre-accent) 50%, transparent), transparent);
         }
 
-        .event-date {
-            font-family: 'Bebas Neue', sans-serif;
-            font-size: 2.5rem;
-            line-height: 1;
-            color: var(--acid-green);
-            letter-spacing: 0.05em;
-        }
-
-        .event-day {
-            font-size: 0.75rem;
-            color: var(--electric-blue);
-            text-transform: uppercase;
-            letter-spacing: 0.15em;
-            margin-top: 5px;
-        }
-
-        .event-time {
-            font-size: 0.85rem;
-            color: var(--electric-blue);
-            text-align: right;
-            font-family: 'Azeret Mono', monospace;
-            font-weight: 600;
-        }
-
-        .event-body {
-            padding: 20px;
-        }
-
-        .event-title {
-            font-family: 'Azeret Mono', monospace;
-            font-size: 1.1rem;
-            font-weight: 600;
-            margin-bottom: 12px;
-            color: var(--white);
-            line-height: 1.3;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .event-venue {
-            font-size: 0.9rem;
-            color: var(--electric-blue);
-            margin-bottom: 8px;
-            font-weight: 400;
-        }
-
-        .event-genre {
-            display: inline-block;
-            background: rgba(204, 255, 0, 0.1);
-            border: 1px solid var(--acid-green);
-            color: var(--acid-green);
-            padding: 4px 10px;
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            margin-top: 12px;
-            font-family: 'Azeret Mono', monospace;
-        }
-
-        .event-source {
+        /* --- Price badge (top-right corner) --- */
+        .card-price {
             position: absolute;
-            top: 10px;
-            right: 10px;
+            top: 16px;
+            right: 0;
+            padding: 3px 12px 3px 16px;
+            background: #111;
+            color: #777;
+            font-family: 'Bebas Neue', 'Impact', sans-serif;
+            font-size: 0.85rem;
+            letter-spacing: 0.06em;
+            clip-path: polygon(14px 0, 100% 0, 100% 100%, 0 100%);
+        }
+
+        .card-price--free {
+            background: var(--genre-accent);
+            color: #000;
             font-size: 1rem;
-            color: var(--acid-green);
+            letter-spacing: 0.12em;
+            padding: 4px 14px 4px 18px;
+            font-weight: 700;
+        }
+
+        /* --- Card body --- */
+        .card-body {
+            padding: 18px 18px 14px;
+        }
+
+        /* --- Date line: "SAT 22 · 9PM" --- */
+        .card-dateline {
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .card-day-date {
+            font-family: 'Bebas Neue', 'Impact', sans-serif;
+            font-size: 1.1rem;
+            color: var(--genre-accent);
+            letter-spacing: 0.1em;
+        }
+
+        .card-time {
+            font-size: 0.72rem;
+            color: #444;
+            font-family: 'DM Mono', 'Azeret Mono', 'Courier New', monospace;
+            letter-spacing: 0.05em;
+        }
+
+        /* --- Title — the hook --- */
+        .card-title {
+            margin: 0 0 12px 0;
+            font-family: 'Bebas Neue', 'Impact', sans-serif;
+            font-size: 1.5rem;
+            line-height: 1.05;
+            color: #fff;
+            letter-spacing: 0.04em;
             text-transform: uppercase;
-            letter-spacing: 0.15em;
-            font-weight: 600;
-            opacity: 0.7;
+            padding-right: 60px;
+            transition: color 0.2s;
+        }
+
+        .event-card:hover .card-title {
+            color: var(--genre-accent);
+        }
+
+        /* --- Venue row --- */
+        .card-venue-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .card-genre-dot {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--genre-accent);
+            opacity: 0.6;
+            flex-shrink: 0;
+        }
+
+        .card-venue {
+            font-size: 0.78rem;
+            color: #555;
+            letter-spacing: 0.02em;
+        }
+
+        .share-btn {
+            background: transparent;
+            border: 1px solid #1a1a1a;
+            color: #555;
+            padding: 6px 10px;
+            cursor: pointer;
+            font-family: 'Azeret Mono', monospace;
+            font-size: 0.7rem;
+            letter-spacing: 0.1em;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .share-btn:hover {
+            border-color: var(--acid-green);
+            color: var(--acid-green);
+        }
+        .share-btn.copied {
+            border-color: var(--acid-green);
+            color: var(--acid-green);
+        }
+
+        /* --- Bottom hover line --- */
+        .card-hover-line {
+            height: 2px;
+            background: var(--genre-accent);
+            transform: scaleX(0);
+            transform-origin: left;
+            transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .event-card:hover .card-hover-line {
+            transform: scaleX(1);
+        }
+
+        /* ═══════════════════════════════════════════════
+           GRID — keep existing .events-grid but update minmax
+           ═══════════════════════════════════════════════ */
+        .events-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 14px;
+            margin-bottom: 60px;
+        }
+
+        /* Mobile: single column */
+        @media (max-width: 640px) {
+            .events-grid {
+                grid-template-columns: 1fr;
+                gap: 10px;
+            }
+
+            .card-title {
+                font-size: 1.3rem;
+            }
+
+            .card-body {
+                padding: 14px 14px 12px;
+            }
         }
 
         /* Live indicator */
@@ -1300,6 +1560,20 @@ function generateHTML(eventsByDate, sortedDates) {
             }
         }
     </style>
+    <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "Bay Moves",
+  "url": "https://baymoves.now/",
+  "description": "Bay Area music event aggregator covering raves, club nights, punk, indie, and electronic shows in San Francisco, Oakland, Berkeley, and San Jose.",
+  "potentialAction": {
+    "@type": "SearchAction",
+    "target": "https://baymoves.now/?q={search_term_string}",
+    "query-input": "required name=search_term_string"
+  }
+}
+    </script>
 </head>
 <body data-today="${todayStr}">
     <div class="container">
@@ -1338,6 +1612,24 @@ function generateHTML(eventsByDate, sortedDates) {
     </div>
 
     <script>
+        function shareEvent(url, title) {
+            if (navigator.share) {
+                navigator.share({ title: title, url: url }).catch(function(){});
+            } else {
+                navigator.clipboard.writeText(url).then(function() {
+                    var btn = document.activeElement;
+                    if (btn && btn.classList.contains('share-btn')) {
+                        btn.classList.add('copied');
+                        var origHTML = btn.innerHTML;
+                        btn.innerHTML = 'COPIED';
+                        setTimeout(function() {
+                            btn.innerHTML = origHTML;
+                            btn.classList.remove('copied');
+                        }, 1500);
+                    }
+                });
+            }
+        }
         document.addEventListener('DOMContentLoaded', function() {
             const timeFilterBtns = document.querySelectorAll('.filter-btn[data-time-filter]');
             const genreChipBtns = document.querySelectorAll('.genre-chip');
@@ -1428,16 +1720,6 @@ function generateHTML(eventsByDate, sortedDates) {
                 });
             });
 
-            // Add hover sound effect simulation (visual feedback)
-            eventCards.forEach(card => {
-                card.addEventListener('mouseenter', () => {
-                    card.style.transform = 'translateY(-4px) scale(1.01)';
-                });
-                card.addEventListener('mouseleave', () => {
-                    card.style.transform = 'translateY(0) scale(1)';
-                });
-            });
-
             // Parallax effect on scroll
             window.addEventListener('scroll', () => {
                 const scrolled = window.pageYOffset;
@@ -1465,29 +1747,83 @@ function generateHTML(eventsByDate, sortedDates) {
       
       eventsByDate[date].forEach(event => {
         const genres = getGenres(event);
+        const primaryGenre = genres.split(',')[0].trim().toLowerCase() || 'misc';
         const venueDisplay = event.city ? `${event.venue}, ${event.city}` : event.venue;
-        const cardContent = `                <div class="event-header">\n` +
-          `                    <div>\n` +
-          `                        <div class="event-date">${dayNum}</div>\n` +
-          `                        <div class="event-day">${dayAbbr}</div>\n` +
-          `                    </div>\n` +
-          (event.time ? `                    <div class="event-time">${escapeHtml(event.time)}</div>\n` : '') +
+        const price = extractPrice(event);
+        const isFree = price === 'FREE';
+
+        const slug = generateSlug(event);
+        const shareUrl = `https://baymoves.com/e/${slug}`;
+        const shareTitleJs = (event.title || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const shareOnclick = `event.preventDefault();event.stopPropagation();shareEvent('${shareUrl}','${shareTitleJs}')`
+          .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const shareBtn = `<button class="share-btn" onclick="${shareOnclick}" title="Share">` +
+          `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>` +
+          `</button>`;
+
+        const cardContent =
+          // Genre color band — top edge
+          `                <div class="card-genre-bar"></div>\n` +
+          // Price badge — top right corner, skip if no price
+          (price
+            ? `                <div class="card-price${isFree ? ' card-price--free' : ''}">${escapeHtml(price)}</div>\n`
+            : '') +
+          // Card body
+          `                <div class="card-body">\n` +
+          `                  <div class="card-dateline">\n` +
+          `                    <span class="card-day-date">${dayAbbr} ${dayNum}</span>\n` +
+          (event.time
+            ? `                    <span class="card-time">${escapeHtml(event.time)}</span>\n`
+            : '') +
+          `                  </div>\n` +
+          `                  <h3 class="card-title">${escapeHtml(event.title)}</h3>\n` +
+          `                  <div class="card-venue-row">\n` +
+          `                    <span class="card-genre-dot"></span>\n` +
+          (event.venue
+            ? `                    <span class="card-venue">${escapeHtml(venueDisplay)}</span>\n`
+            : '') +
+          `                  </div>\n` +
+          `                  ${shareBtn}\n` +
           `                </div>\n` +
-          `                <div class="event-body">\n` +
-          `                    <div class="event-title">${escapeHtml(event.title)}</div>\n` +
-          (event.venue ? `                    <div class="event-venue">${escapeHtml(venueDisplay)}</div>\n` : '') +
-          `                </div>\n`;
-        const openWrap = event.link ? `            <a href="${escapeHtml(event.link)}" target="_blank" rel="noopener noreferrer" class="event-card-link">\n` : '';
+          // Bottom accent line (animates on hover)
+          `                <div class="card-hover-line"></div>\n`;
+
+        const openWrap = event.link
+          ? `            <a href="${escapeHtml(event.link)}" target="_blank" rel="noopener noreferrer" class="event-card-link">\n`
+          : '';
         const closeWrap = event.link ? `            </a>\n` : '';
-        cardsHtml += openWrap + `            <div class="event-card" data-genres="${escapeHtml(genres)}" data-event-date="${date}">\n` + cardContent + `            </div>\n` + closeWrap + '\n';
+
+        cardsHtml += openWrap +
+          `            <div class="event-card" data-genres="${escapeHtml(genres)}" data-primary-genre="${primaryGenre}" data-event-date="${date}">\n` +
+          cardContent +
+          `            </div>\n` +
+          closeWrap + '\n';
       });
     });
   }
   
   // Replace placeholder with generated cards
   html = html.replace('<!--EVENT_CARDS_PLACEHOLDER-->', cardsHtml);
-  
+
   fs.writeFileSync('index.html', html, 'utf8');
+
+  // SEO: robots.txt and sitemap.xml
+  const robotsTxt = `User-agent: *
+Allow: /
+Sitemap: https://baymoves.now/sitemap.xml
+`;
+  fs.writeFileSync('robots.txt', robotsTxt, 'utf8');
+
+  const sitemapXml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://baymoves.now/</loc>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>
+`;
+  fs.writeFileSync('sitemap.xml', sitemapXml, 'utf8');
 }
 
 // Escape HTML to prevent XSS
