@@ -1578,7 +1578,7 @@ function generateHTML(eventsByDate, sortedDates) {
 <body data-today="${todayStr}">
     <div class="container">
         <header>
-            <h1>BAYMOVES.NOW (-slutty tyler durden)</h1>
+            <h1>BAYMOVES.NOW</h1>
             <div class="subtitle">Bay Area // All Ages // Live Aggregation</div>
         </header>
 

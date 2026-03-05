@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px;
+    height: 630px;
+    overflow: hidden;
+    background: #08080a;
+    font-family: 'Bebas Neue', 'Impact', 'Arial Black', sans-serif;
+  }
+</style>
+</head>
+<body>
+<div style="width:1200px; height:630px; position:relative; overflow:hidden;">
+
+  <!-- LAYER 0: Atmospheric genre gradient wash -->
+  <div style="position:absolute; inset:0; background:
+    radial-gradient(ellipse 80% 120% at 95% 60%, {{GENRE_C}}18 0%, transparent 60%),
+    radial-gradient(ellipse 60% 80% at 10% 90%, {{GENRE_C}}0c 0%, transparent 50%),
+    linear-gradient(160deg, {{GENRE_DIM}}44 0%, transparent 40%);
+  "></div>
+
+  <!-- LAYER 1: GIANT DATE WATERMARK — 496px, top:140, right:60, opacity 0.35 -->
+  <div style="position:absolute; right:60px; top:140px; font-size:496px; font-weight:900; line-height:0.75; color:{{GENRE_C}}; opacity:0.35; letter-spacing:-0.04em; pointer-events:none;">{{DAY_NUM}}</div>
+
+  <!-- LAYER 2: Day abbreviation rotated 90deg — 64px, right:80, opacity 0.5 -->
+  <div style="position:absolute; right:80px; top:50%; transform:translateY(-50%) rotate(90deg); transform-origin:center center; font-size:64px; letter-spacing:0.3em; color:{{GENRE_C}}; opacity:0.5; pointer-events:none;">{{DAY_ABBR}}</div>
+
+  <!-- TOP GENRE BAND — 5px gradient -->
+  <div style="position:absolute; top:0; left:0; right:0; height:5px; background:linear-gradient(90deg, {{GENRE_C}}, {{GENRE_C}}66, transparent 70%);"></div>
+
+  <!-- BOTTOM ACCENT LINE — 3px gradient -->
+  <div style="position:absolute; bottom:0; left:0; right:0; height:3px; background:linear-gradient(90deg, {{GENRE_C}}88, {{GENRE_C}}22);"></div>
+
+  <!-- PRICE TAG — angled clipPath, top right -->
+  <div style="position:absolute; top:24px; right:0; padding:{{PRICE_PADDING}}; background:{{PRICE_BG}}; color:{{PRICE_COLOR}}; font-size:{{PRICE_SIZE}}px; font-weight:700; letter-spacing:{{PRICE_SPACING}}; clip-path:polygon(18px 0, 100% 0, 100% 100%, 0 100%); z-index:5; {{PRICE_BORDER}}">{{PRICE}}</div>
+
+  <!-- SCANLINES -->
+  <div style="position:absolute; inset:0; background:repeating-linear-gradient(0deg, transparent, transparent 14px, rgba(255,255,255,0.012) 14px, rgba(255,255,255,0.012) 15px); pointer-events:none; z-index:4;"></div>
+
+  <!-- MAIN CONTENT -->
+  <div style="position:relative; z-index:3; padding:44px 48px 36px; height:100%; display:flex; flex-direction:column; justify-content:space-between;">
+
+    <!-- TOP: Readable date + time -->
+    <div style="display:flex; align-items:baseline; gap:14px;">
+      <span style="font-size:52px; color:{{GENRE_C}}; letter-spacing:0.06em; line-height:1; text-shadow:0 0 40px {{GENRE_C}}33;">{{DAY_ABBR}} {{DAY_NUM}}</span>
+      <span style="font-size:20px; color:#333; font-family:monospace; letter-spacing:0.08em;">{{TIME}}</span>
+    </div>
+
+    <!-- CENTER: TITLE + GENRE TAG -->
+    <div>
+      <div style="font-size:{{TITLE_SIZE}}px; line-height:0.95; color:#fff; letter-spacing:0.03em; text-transform:uppercase; max-width:75%; text-shadow:0 2px 20px rgba(0,0,0,0.5);">{{TITLE}}</div>
+      <!-- GENRE TAG — 70% of title size, genre-colored, bordered -->
+      <div style="margin-top:10px; display:inline-block; font-size:{{GENRE_TAG_SIZE}}px; color:{{GENRE_C}}; letter-spacing:0.15em; padding:4px 14px; border:2px solid {{GENRE_C}}55; background:{{GENRE_C}}10;">{{GENRE_LABEL}}</div>
+    </div>
+
+    <!-- BOTTOM: Venue + brand -->
+    <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div style="width:7px; height:7px; border-radius:50%; background:{{GENRE_C}}; opacity:0.6; box-shadow:0 0 10px {{GENRE_C}}44;"></div>
+        <span style="font-size:22px; color:#444; font-family:monospace; letter-spacing:0.03em;">{{VENUE}}, {{CITY}}</span>
+      </div>
+      <div style="font-size:18px; color:#ccff00; letter-spacing:0.12em; opacity:0.35;">BAYMOVES.COM</div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>
