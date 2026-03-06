@@ -1,6 +1,5 @@
 {
-    "buildCommand": "npm run build",
-    "outputDirectory": ".",
-    "cleanUrls": true,
-    "trailingSlash": false
-  }
+  "outputDirectory": ".",
+  "cleanUrls": true,
+  "trailingSlash": false
+}
