@@ -1,5 +1,6 @@
 {
   "outputDirectory": ".",
+  "buildCommand": "echo 'Static deploy — build runs locally'",
   "cleanUrls": true,
   "trailingSlash": false
 }
