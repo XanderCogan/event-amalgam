@@ -1003,13 +1003,15 @@ function generateHTML(eventsByDate, sortedDates) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bay Moves – Bay Area Music Events, Raves, Shows & Nightlife</title>
+    <title>Bay Moves – Bay Area Raves, Shows & Nightlife</title>
     <meta name="description" content="Find every rave, club night, punk show, and indie concert in San Francisco, Oakland, Berkeley, and San Jose. Updated daily. All ages welcome.">
     <link rel="canonical" href="https://baymoves.now/" />
+    <meta name="robots" content="index, follow" />
+    <meta name="theme-color" content="#0A0A0A" />
 
     <!-- Open Graph -->
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Bay Moves – Bay Area Music Events & Nightlife" />
+    <meta property="og:title" content="Bay Moves – Bay Area Raves, Shows & Nightlife" />
     <meta property="og:description" content="Every rave, club night, punk show, and indie concert across the Bay Area. Updated daily." />
     <meta property="og:url" content="https://baymoves.now/" />
     <meta property="og:site_name" content="Bay Moves" />
@@ -1019,15 +1021,22 @@ function generateHTML(eventsByDate, sortedDates) {
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Bay Moves – Bay Area Music Events & Nightlife" />
+    <meta name="twitter:title" content="Bay Moves – Bay Area Raves, Shows & Nightlife" />
     <meta name="twitter:description" content="Every rave, club night, punk show, and indie concert across the Bay Area. Updated daily." />
     <meta name="twitter:image" content="https://baymoves.now/og-image.png" />
 
-    <meta name="robots" content="index, follow" />
-    <meta name="theme-color" content="#0A0A0A" />
-    <link rel="icon" type="image/png" href="baymovesLogo1.png" />
+    <!-- Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      "name": "Bay Moves",
+      "url": "https://baymoves.now/",
+      "description": "Bay Area music event aggregator covering raves, club nights, punk, indie, and electronic shows in SF, Oakland, Berkeley, and San Jose."
+    }
+    </script>
 
-    <!-- Fonts -->
+    <link rel="icon" type="image/png" href="baymovesLogo1.png" />
     <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Azeret+Mono:wght@400;600&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -1560,20 +1569,6 @@ function generateHTML(eventsByDate, sortedDates) {
             }
         }
     </style>
-    <script type="application/ld+json">
-{
-  "@context": "https://schema.org",
-  "@type": "WebSite",
-  "name": "Bay Moves",
-  "url": "https://baymoves.now/",
-  "description": "Bay Area music event aggregator covering raves, club nights, punk, indie, and electronic shows in San Francisco, Oakland, Berkeley, and San Jose.",
-  "potentialAction": {
-    "@type": "SearchAction",
-    "target": "https://baymoves.now/?q={search_term_string}",
-    "query-input": "required name=search_term_string"
-  }
-}
-    </script>
 </head>
 <body data-today="${todayStr}">
     <div class="container">
