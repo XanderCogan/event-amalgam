@@ -44,3 +44,6 @@ jobs:
             git commit -m "Automated build: $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
           fi
+
+      - name: Trigger Vercel deployment
+        run: curl -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}"
