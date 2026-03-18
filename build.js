@@ -5,6 +5,18 @@ const fs = require('fs');
 const puppeteer = require('puppeteer');
 const { classifyAllEvents } = require('./classify-events');
 
+// Shared 21+ detection helper (standardized across all sources)
+function is21Plus(text) {
+  const lower = text.toLowerCase();
+  return lower.includes('21+') ||
+         lower.includes('21 +') ||
+         lower.includes('+ 21') ||
+         lower.includes('21 and over') ||
+         lower.includes('21 & over') ||
+         lower.includes('21 & up') ||
+         lower.includes('(21+)');
+}
+
 // Fetch HTML from a URL
 async function fetchHTML(url) {
   try {
@@ -30,13 +42,16 @@ function parseDateString(dateStr) {
     }
   }
   
-  // Try to parse "Monday, Jan 20" or "Mon Jan 20" format
-  const dateObj = new Date(dateStr);
+  // Try to parse "Monday, Jan 20" or "Mon Jan 20" or "Mon: Mar 16" format
+  // Normalize: remove colon after day name (19hz uses "Mon: Mar 16" format)
+  const normalizedDateStr = dateStr.replace(/^(\w+):/, '$1');
+  const dateObj = new Date(normalizedDateStr);
   if (!isNaN(dateObj.getTime())) {
-    const year = dateObj.getFullYear();
     const month = String(dateObj.getMonth() + 1).padStart(2, '0');
     const day = String(dateObj.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+    // JS Date defaults to 2001 when no year is provided; use current year instead
+    const currentYear = new Date().getFullYear();
+    return `${currentYear}-${month}-${day}`;
   }
   
   return null;
@@ -89,6 +104,95 @@ function adjustForAfterMidnight(dateStr, timeStr) {
   return dateStr;
 }
 
+// Expand recurring event patterns like "Mondays", "2nd Fridays", "2nd/4th Saturdays" into concrete dates
+function expandRecurringDates(dateTimeStr) {
+  const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const lower = dateTimeStr.toLowerCase();
+
+  // Extract time from parentheses, e.g., "(9:30pm-2:30am)" -> "9:30pm"
+  let time = null;
+  const timeMatch = dateTimeStr.match(/\((\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
+  if (timeMatch) {
+    time = timeMatch[1];
+  }
+
+  // Match patterns like "2nd/4th Saturdays", "1st Fridays", "2nd Wednesdays", "Mondays"
+  const ordinalPattern = /(\d+(?:st|nd|rd|th)(?:\/\d+(?:st|nd|rd|th))*)\s+(\w+days?)/i;
+  const simplePattern = /^(\w+days?)\s*\(/i;
+
+  let dayOfWeek = -1;
+  let ordinals = null;
+
+  const ordinalMatch = lower.match(ordinalPattern);
+  if (ordinalMatch) {
+    // e.g., "2nd/4th Saturdays" or "1st Fridays"
+    const ordinalStr = ordinalMatch[1];
+    const dayStr = ordinalMatch[2].replace(/s$/, ''); // remove trailing 's'
+    dayOfWeek = dayNames.indexOf(dayStr);
+    // Parse ordinals like "2nd/4th" -> [2, 4] or "1st" -> [1]
+    ordinals = ordinalStr.match(/\d+/g).map(Number);
+  } else {
+    const simpleMatch = lower.match(simplePattern);
+    if (simpleMatch) {
+      // e.g., "Mondays" or "Fridays"
+      const dayStr = simpleMatch[1].replace(/s$/, '');
+      dayOfWeek = dayNames.indexOf(dayStr);
+      ordinals = null; // means every week
+    }
+  }
+
+  if (dayOfWeek === -1) return [];
+
+  const dates = [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (ordinals) {
+    // Monthly pattern: find Nth occurrence of dayOfWeek in current and next month
+    for (let monthOffset = 0; monthOffset < 2; monthOffset++) {
+      const targetMonth = new Date(today.getFullYear(), today.getMonth() + monthOffset, 1);
+
+      for (const nth of ordinals) {
+        // Find the Nth occurrence of dayOfWeek in this month
+        let count = 0;
+        const d = new Date(targetMonth);
+        while (d.getMonth() === targetMonth.getMonth()) {
+          if (d.getDay() === dayOfWeek) {
+            count++;
+            if (count === nth) {
+              if (d >= today) {
+                const y = d.getFullYear();
+                const m = String(d.getMonth() + 1).padStart(2, '0');
+                const day = String(d.getDate()).padStart(2, '0');
+                dates.push({ date: `${y}-${m}-${day}`, time });
+              }
+              break;
+            }
+          }
+          d.setDate(d.getDate() + 1);
+        }
+      }
+    }
+  } else {
+    // Weekly pattern: find all occurrences in next 4 weeks
+    const d = new Date(today);
+    // Find next occurrence of dayOfWeek
+    while (d.getDay() !== dayOfWeek) {
+      d.setDate(d.getDate() + 1);
+    }
+    // Add 4 weeks worth
+    for (let i = 0; i < 4; i++) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      dates.push({ date: `${y}-${m}-${day}`, time });
+      d.setDate(d.getDate() + 7);
+    }
+  }
+
+  return dates;
+}
+
 // Parse 19hz.info events
 function parse19hz(html) {
   const $ = cheerio.load(html);
@@ -108,7 +212,7 @@ function parse19hz(html) {
       const links = $(cells[5]).text().trim();
       
       // Filter: exclude 21+ events
-      if (priceAge.toLowerCase().includes('21+') || priceAge.toLowerCase().includes('+ 21')) {
+      if (is21Plus(priceAge)) {
         return;
       }
       
@@ -122,7 +226,7 @@ function parse19hz(html) {
       let time = null;
       
       // Try to match date and time together first
-      const dateTimeMatch = dateTime.match(/(\d{1,2}\/\d{1,2}\/\d{4}|\w+day,?\s+\w+\s+\d{1,2})[\s,]+(\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)?)/i);
+      const dateTimeMatch = dateTime.match(/(\d{1,2}\/\d{1,2}\/\d{4}|\w+(?:day)?:?,?\s+\w+\s+\d{1,2})[\s,]+(\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)?)/i);
       if (dateTimeMatch) {
         const dateStr = dateTimeMatch[1];
         const timeStr = dateTimeMatch[2];
@@ -130,7 +234,7 @@ function parse19hz(html) {
         date = parseDateString(dateStr);
       } else {
         // Try to match date without time
-        const dateOnlyMatch = dateTime.match(/(\d{1,2}\/\d{1,2}\/\d{4}|\w+day,?\s+\w+\s+\d{1,2})/i);
+        const dateOnlyMatch = dateTime.match(/(\d{1,2}\/\d{1,2}\/\d{4}|\w+(?:day)?:?,?\s+\w+\s+\d{1,2})/i);
         if (dateOnlyMatch) {
           date = parseDateString(dateOnlyMatch[1]);
           // Try to extract time separately
@@ -168,10 +272,31 @@ function parse19hz(html) {
           bands: [],
           link: null
         });
+      } else {
+        // Try to expand recurring event patterns like "Mondays", "2nd Fridays"
+        const recurringDates = expandRecurringDates(dateTime);
+        if (recurringDates.length > 0) {
+          console.log(`  ℹ️ 19hz: Expanded recurring "${dateTime}" into ${recurringDates.length} dates`);
+          for (const rd of recurringDates) {
+            events.push({
+              date: rd.date,
+              time: rd.time || time,
+              source: '19hz',
+              title,
+              venue,
+              city,
+              details: `${priceAge}${tags ? ' | ' + tags : ''}`,
+              bands: [],
+              link: null
+            });
+          }
+        } else {
+          console.log(`  ⚠️ 19hz: Skipped (no date): ${title.substring(0, 50)} | raw: "${dateTime}"`);
+        }
       }
     });
   });
-  
+
   return events;
 }
 
@@ -245,7 +370,7 @@ $('body > ul > li, body > ol > li').each((i, item) => {
       const fullText = $eventItem.text().trim();
       
       // Filter: exclude 21+ events
-      if (fullText.toLowerCase().includes('21+')) {
+      if (is21Plus(fullText)) {
         return;
       }
       
@@ -269,8 +394,8 @@ $('body > ul > li, body > ol > li').each((i, item) => {
           return;
         }
       } else {
-        // If no city is found, exclude the event
-        return;
+        // No city found - include with Bay Area default
+        city = 'Bay Area';
       }
       
       // Extract bands (subsequent links)
@@ -324,8 +449,10 @@ $('body > ul > li, body > ol > li').each((i, item) => {
           bands,
           link: null
         });
+      } else {
+        console.log(`    ⚠️ Foopee: Skipped (missing ${!date ? 'date' : 'venue'})`);
       }
-    });  
+    });
   }
   });
   return events;
@@ -346,7 +473,7 @@ async function scrapePoshVip() {
   
   try {
     const allEvents = [];
-    const timeRanges = ['This Week', 'Next Week', 'This Month'];
+    const timeRanges = ['This Week', 'This Month'];
     
     for (const when of timeRanges) {
       console.log(`  Fetching ${when}...`);
@@ -411,7 +538,7 @@ async function scrapePoshVip() {
       const time = `${displayHours}:${String(minutes).padStart(2, '0')} ${ampm}`;
       
       const fullText = `${event.name} ${event.venue?.name || ''} ${event.description || ''}`.toLowerCase();
-      if (fullText.includes('21+') || fullText.includes('(21+)') || fullText.includes('21 +')) {
+      if (is21Plus(fullText)) {
         continue;
       }
       
@@ -507,7 +634,7 @@ async function parsePartiful() {
       const cityStr = (e.locationInfo?.mapsInfo?.approximateLocation || addressLines[addressLines.length - 1] || '').toString().toLowerCase();
       const fullText = `${title} ${venue} ${e.description || ''}`.toLowerCase();
 
-      if (fullText.includes('21+') || fullText.includes('21 and over') || fullText.includes('(21+)') || fullText.includes('21 & up')) continue;
+      if (is21Plus(fullText)) continue;
       const inBayArea = bayAreaCities.some(c => cityStr.includes(c) || fullText.includes(c));
       if (!inBayArea) continue;
 
