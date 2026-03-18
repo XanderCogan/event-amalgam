@@ -1164,7 +1164,10 @@ function generateHTML(eventsByDate, sortedDates) {
     </script>
 
     <link rel="icon" type="image/png" href="baymovesLogo1.png" />
-    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Azeret+Mono:wght@400;600&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Azeret+Mono:wght@400;600&family=DM+Mono:wght@300;400&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+    <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Azeret+Mono:wght@400;600&family=DM+Mono:wght@300;400&display=swap"></noscript>
     <style>
         :root {
             --acid-green: #CCFF00;
@@ -1356,7 +1359,7 @@ function generateHTML(eventsByDate, sortedDates) {
             font-family: 'Azeret Mono', monospace;
             font-size: 0.75rem;
             letter-spacing: 0.15em;
-            color: var(--concrete);
+            color: #666;
             text-transform: uppercase;
         }
 
@@ -1437,6 +1440,8 @@ function generateHTML(eventsByDate, sortedDates) {
                         box-shadow 0.3s ease;
             cursor: pointer;
             animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+            content-visibility: auto;
+            contain-intrinsic-size: 0 180px;
         }
         .event-card:nth-child(1) { animation-delay: 0.05s; }
         .event-card:nth-child(2) { animation-delay: 0.08s; }
@@ -1507,7 +1512,7 @@ function generateHTML(eventsByDate, sortedDates) {
 
         .card-time {
             font-size: 0.72rem;
-            color: #444;
+            color: #888;
             font-family: 'DM Mono', 'Azeret Mono', 'Courier New', monospace;
             letter-spacing: 0.05em;
         }
@@ -1547,14 +1552,14 @@ function generateHTML(eventsByDate, sortedDates) {
 
         .card-venue {
             font-size: 0.78rem;
-            color: #555;
+            color: #888;
             letter-spacing: 0.02em;
         }
 
         .share-btn {
             background: transparent;
             border: 1px solid #1a1a1a;
-            color: #555;
+            color: #888;
             padding: 6px 10px;
             cursor: pointer;
             font-family: 'Azeret Mono', monospace;
@@ -1704,6 +1709,7 @@ function generateHTML(eventsByDate, sortedDates) {
             <div class="subtitle">Bay Area // All Ages // Live Aggregation</div>
         </header>
 
+        <main>
         <!-- Primary time filters -->
         <div class="filters primary-filters">
             <button class="filter-btn" data-time-filter="tonight">Tonight</button>
@@ -1726,6 +1732,7 @@ function generateHTML(eventsByDate, sortedDates) {
             <div class="no-events-filtered" id="noEventsFiltered" style="display: none;">No events found</div>
             <!--EVENT_CARDS_PLACEHOLDER-->
         </div>
+        </main>
     </div>
 
     <div class="live-indicator">
@@ -1846,7 +1853,7 @@ function generateHTML(eventsByDate, sortedDates) {
             window.addEventListener('scroll', () => {
                 const scrolled = window.pageYOffset;
                 document.querySelector('header').style.transform = 'translateY(' + (scrolled * 0.3) + 'px)';
-            });
+            }, { passive: true });
         });
     </script>
 </body>
@@ -1898,7 +1905,7 @@ function generateHTML(eventsByDate, sortedDates) {
             ? `                    <span class="card-time">${escapeHtml(event.time)}</span>\n`
             : '') +
           `                  </div>\n` +
-          `                  <h3 class="card-title">${escapeHtml(event.title)}</h3>\n` +
+          `                  <h2 class="card-title">${escapeHtml(event.title)}</h2>\n` +
           `                  <div class="card-venue-row">\n` +
           `                    <span class="card-genre-dot"></span>\n` +
           (event.venue
