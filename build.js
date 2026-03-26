@@ -113,7 +113,7 @@ function expandRecurringDates(dateTimeStr) {
   let time = null;
   const timeMatch = dateTimeStr.match(/\((\d{1,2}(?::\d{2})?\s*(?:am|pm))/i);
   if (timeMatch) {
-    time = timeMatch[1];
+    time = normalizeTime(timeMatch[1]);
   }
 
   // Match patterns like "2nd/4th Saturdays", "1st Fridays", "2nd Wednesdays", "Mondays"
@@ -194,6 +194,43 @@ function expandRecurringDates(dateTimeStr) {
 }
 
 // Parse 19hz.info events
+// Normalize time strings to consistent format: "9PM", "9:30PM", "9PM/10PM"
+function normalizeTime(str) {
+  if (!str) return str;
+  // Remove "til" clauses: "6pm/7pm til 9pm" → "6pm/7pm"
+  str = str.replace(/\s+til\s+.*/i, '').trim();
+  // Normalize each segment separated by /
+  return str.split('/').map(seg => {
+    seg = seg.trim();
+    const m = seg.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+    if (!m) return seg;
+    const h = m[1];
+    const mins = m[2];
+    const ampm = m[3].toUpperCase();
+    return (mins && mins !== '00') ? `${h}:${mins}${ampm}` : `${h}${ampm}`;
+  }).join('/');
+}
+
+// Normalize city names to consistent Title Case, strip state suffixes
+// Strip inline street addresses appended to venue names: "Victory Stables, 2328 San Pablo Ave" → "Victory Stables"
+function cleanVenueName(name) {
+  if (!name) return name;
+  return name.replace(/,\s*\d+\s+\S.*$/, '').trim();
+}
+
+function normalizeCity(str) {
+  if (!str) return str;
+  str = str.replace(/,?\s*(ca|california|usa)\.?$/i, '').trim();
+  const lower = str.toLowerCase();
+  if (lower === 's.f.' || lower === 'sf') return 'SF';
+  if (lower === 'san francisco') return 'San Francisco';
+  if (lower === 'oakland') return 'Oakland';
+  if (lower === 'berkeley' || lower === 'berkely') return 'Berkeley';
+  if (lower === 'san jose') return 'San Jose';
+  if (lower === 'emeryville') return 'Emeryville';
+  return str.replace(/\b\w/g, c => c.toUpperCase());
+}
+
 function parse19hz(html) {
   const $ = cheerio.load(html);
   const events = [];
@@ -216,10 +253,9 @@ function parse19hz(html) {
         return;
       }
       
-      // Filter: exclude Sacramento events
-      if (eventTitleVenue.includes('(Sacramento)')) {
-        return;
-      }
+      // Filter: exclude out-of-area events
+      if (eventTitleVenue.includes('(Sacramento)')) return;
+      if (eventTitleVenue.includes('(Nevada City)')) return;
       
       // Parse date and time
       let date = null;
@@ -230,7 +266,7 @@ function parse19hz(html) {
       if (dateTimeMatch) {
         const dateStr = dateTimeMatch[1];
         const timeStr = dateTimeMatch[2];
-        time = timeStr.trim();
+        time = normalizeTime(timeStr.trim());
         date = parseDateString(dateStr);
       } else {
         // Try to match date without time
@@ -240,7 +276,7 @@ function parse19hz(html) {
           // Try to extract time separately
           const timeMatch = dateTime.match(/(\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)?)/i);
           if (timeMatch) {
-            time = timeMatch[1].trim();
+            time = normalizeTime(timeMatch[1].trim());
           }
         }
       }
@@ -255,7 +291,7 @@ function parse19hz(html) {
       let city = null;
       const cityMatch = venue.match(/\s*\(([^)]+)\)\s*$/);
       if (cityMatch) {
-        city = cityMatch[1].trim();
+        city = normalizeCity(cityMatch[1].trim());
         // Remove the city from the venue name
         venue = venue.substring(0, cityMatch.index).trim();
       }
@@ -382,8 +418,8 @@ $('body > ul > li, body > ol > li').each((i, item) => {
       // Split on comma to separate venue and city
       const commaIndex = venueFull.lastIndexOf(',');
       if (commaIndex !== -1) {
-        venue = venueFull.substring(0, commaIndex).trim();
-        city = venueFull.substring(commaIndex + 1).trim();
+        venue = cleanVenueName(venueFull.substring(0, commaIndex).trim());
+        city = normalizeCity(venueFull.substring(commaIndex + 1).trim());
       }
       
       // Filter: only include S.F., Oakland, and Berkeley events
@@ -419,12 +455,12 @@ $('body > ul > li, body > ol > li').each((i, item) => {
       // Try to match time patterns (including ranges like "6pm/7pm til 9pm")
       const timeMatch = details.match(/(\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM)(?:\/\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM))?(?:\s+til\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|AM|PM))?)/i);
       if (timeMatch) {
-        time = timeMatch[0].trim();
+        time = normalizeTime(timeMatch[0].trim());
       } else {
         // Fallback: try simpler time pattern
         const simpleTimeMatch = details.match(/(\d{1,2}:\d{2}\s*(?:am|pm|AM|PM)?)/i);
         if (simpleTimeMatch) {
-          time = simpleTimeMatch[1].trim();
+          time = normalizeTime(simpleTimeMatch[1].trim());
         }
       }
       
@@ -535,7 +571,7 @@ async function scrapePoshVip() {
       const minutes = startDate.getMinutes();
       const ampm = hours >= 12 ? 'PM' : 'AM';
       const displayHours = hours % 12 || 12;
-      const time = `${displayHours}:${String(minutes).padStart(2, '0')} ${ampm}`;
+      const time = normalizeTime(`${displayHours}:${String(minutes).padStart(2, '0')} ${ampm}`);
       
       const fullText = `${event.name} ${event.venue?.name || ''} ${event.description || ''}`.toLowerCase();
       if (is21Plus(fullText)) {
@@ -637,6 +673,7 @@ async function parsePartiful() {
       if (is21Plus(fullText)) continue;
       const inBayArea = bayAreaCities.some(c => cityStr.includes(c) || fullText.includes(c));
       if (!inBayArea) continue;
+      if (['nevada city', 'sacramento', 'nevada'].some(c => cityStr.startsWith(c))) continue;
 
       const dateStr = e.startDate;
       if (!dateStr) continue;
@@ -652,12 +689,12 @@ async function parsePartiful() {
 
       let time = '';
       const timeParts = d.toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true });
-      if (timeParts) time = timeParts.replace(/\s/g, ' ').trim();
+      if (timeParts) time = normalizeTime(timeParts.trim());
 
       const details = (e.description || '').slice(0, 200);
       const link = `https://partiful.com/e/${e.id}`;
       const category = detectPartifulCategory(title, details);
-      const city = cityStr || null;
+      const city = cityStr ? normalizeCity(cityStr) : null;
 
       events.push({
         date,
@@ -850,6 +887,101 @@ function parsePoshDate(dateStr) {
 }
 
 // Main build function
+// Fetch Eventbrite music/nightlife events via their official API
+// Requires EVENTBRITE_API_KEY in .env — get one free at https://www.eventbrite.com/platform/api
+async function scrapeEventbrite() {
+  const apiKey = process.env.EVENTBRITE_API_KEY;
+  if (!apiKey) {
+    console.log('Eventbrite: No API key set (EVENTBRITE_API_KEY in .env) — skipping');
+    return [];
+  }
+
+  console.log('Fetching events from Eventbrite...');
+  const todayStr = getTodayPacificDateString();
+  const bayAreaCities = ['san francisco', 'sf', 'oakland', 'berkeley', 'san jose', 'emeryville', 'bay area'];
+  const excludedCities = ['nevada city', 'sacramento', 'fresno', 'modesto', 'stockton'];
+  const events = [];
+  const seenIds = new Set();
+
+  // Music (103) + Nightlife (105) across SF, Oakland, Berkeley
+  const locations = [
+    { address: 'San Francisco, CA', lat: 37.7749, lng: -122.4194 },
+    { address: 'Oakland, CA',       lat: 37.8044, lng: -122.2712 },
+    { address: 'Berkeley, CA',      lat: 37.8716, lng: -122.2727 },
+  ];
+
+  for (const loc of locations) {
+    for (const catId of ['103', '105']) {
+      try {
+        const params = new URLSearchParams({
+          'categories': catId,
+          'location.address': loc.address,
+          'location.within': '10mi',
+          'expand': 'venue,ticket_availability',
+          'start_date.range_start': new Date().toISOString(),
+          'page_size': '50',
+          'include_adult_events': 'false',
+          'token': apiKey,
+        });
+        const resp = await fetch(`https://www.eventbriteapi.com/v3/events/search/?${params}`);
+        if (!resp.ok) {
+          console.log(`  Eventbrite API error ${resp.status} for ${loc.address} cat ${catId}`);
+          continue;
+        }
+        const data = await resp.json();
+        const rawEvents = data.events || [];
+        console.log(`  Eventbrite: ${rawEvents.length} events for ${loc.address} cat ${catId}`);
+
+        for (const ev of rawEvents) {
+          if (!ev.id || seenIds.has(ev.id)) continue;
+          seenIds.add(ev.id);
+
+          const title = ev.name?.text || '';
+          if (!title) continue;
+
+          const fullText = `${title} ${ev.description?.text || ''}`.toLowerCase();
+          if (is21Plus(fullText)) continue;
+
+          const startRaw = ev.start?.local || '';
+          if (!startRaw) continue;
+          const startDate = new Date(startRaw);
+          if (isNaN(startDate.getTime())) continue;
+          const tz = ev.start?.timezone || 'America/Los_Angeles';
+          const parts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(startDate);
+          const get = (type) => (parts.find(p => p.type === type) || {}).value || '';
+          const date = `${get('year')}-${get('month')}-${get('day')}`;
+          if (date < todayStr) continue;
+
+          const timeParts = startDate.toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit', hour12: true });
+          const time = timeParts ? normalizeTime(timeParts.trim()) : '';
+
+          const venue = ev.venue;
+          const venueName = cleanVenueName(venue?.name || '');
+          const cityRaw = (venue?.address?.city || '').toLowerCase();
+          if (cityRaw && !bayAreaCities.some(c => cityRaw.includes(c))) continue;
+          if (excludedCities.some(c => cityRaw.startsWith(c))) continue;
+          const city = cityRaw ? normalizeCity(cityRaw) : loc.address.split(',')[0];
+
+          const minPrice = ev.ticket_availability?.minimum_ticket_price?.major_value;
+          const isFree = ev.ticket_availability?.is_free;
+          const details = isFree ? 'FREE' : (minPrice ? `$${minPrice}` : '');
+
+          events.push({
+            date, time, source: 'eventbrite', title,
+            venue: venueName, city, details, bands: [],
+            link: ev.url || '',
+          });
+        }
+      } catch (err) {
+        console.log(`  Eventbrite: Error for ${loc.address}: ${err.message}`);
+      }
+    }
+  }
+
+  console.log(`Parsed ${events.length} events from Eventbrite`);
+  return events;
+}
+
 async function build() {
   console.log('Fetching events from 19hz.info...');
   const html19hz = await fetchHTML('https://19hz.info/eventlisting_BayArea.php');
@@ -885,9 +1017,49 @@ async function build() {
   } catch (err) {
     console.log('Partiful skipped:', err.message);
   }
-  
+
+  // Fetch Eventbrite events (graceful if blocked)
+  let eventbriteEvents = [];
+  try {
+    eventbriteEvents = await scrapeEventbrite();
+  } catch (err) {
+    console.log('Eventbrite skipped:', err.message);
+  }
+
   // Combine and group by date
-  const allEvents = [...events19hz, ...foopeeEvents, ...poshEvents, ...partifulEvents];
+  const allEventsRaw = [...events19hz, ...foopeeEvents, ...poshEvents, ...partifulEvents, ...eventbriteEvents];
+
+  // Post-processing: filter out non-Bay-Area events regardless of source
+  const BAY_AREA_CITIES = new Set([
+    'san francisco', 'sf', 'oakland', 'berkeley', 'san jose', 'emeryville',
+    'bay area', 'daly city', 'south san francisco', 'san mateo', 'palo alto',
+    'sunnyvale', 'mountain view', 'redwood city', 'fremont', 'hayward',
+    'richmond', 'vallejo', 'concord', 'walnut creek', 'san leandro',
+    'alameda', 'sausalito', 'mill valley', 'san rafael', 'fairfax',
+    'marin', 'napa', 'petaluma', 'santa rosa', 'tba',
+  ]);
+  // City names that should not be used as venue names (they're just cities)
+  const CITY_NAMES = new Set([
+    'san francisco', 'sf', 'oakland', 'berkeley', 'san jose', 'emeryville',
+    'bay area', 'daly city', 'south san francisco', 'san mateo',
+  ]);
+
+  const allEvents = allEventsRaw.filter(event => {
+    const cityLower = (event.city || '').toLowerCase();
+    // Allow events with no city (city is TBA or unset)
+    if (!cityLower) return true;
+    // Exclude if city doesn't match any Bay Area city
+    return BAY_AREA_CITIES.has(cityLower) || [...BAY_AREA_CITIES].some(c => cityLower.includes(c));
+  }).map(event => {
+    // Clean up garbled venues: if venue is just a city name, clear it
+    if (event.venue && CITY_NAMES.has(event.venue.toLowerCase())) {
+      event.venue = '';
+    }
+    return event;
+  });
+
+  const filtered = allEventsRaw.length - allEvents.length;
+  if (filtered > 0) console.log(`Filtered ${filtered} out-of-area events`);
 
   // AI genre classification
   await classifyAllEvents(allEvents);
@@ -1058,11 +1230,15 @@ function extractPrice(event) {
     return 'FREE';
   }
 
-  // Match price patterns: $10, $10-$20, $10–$20, $10/$20
-  const priceMatch = (event.details || '').match(/\$[\d]+(?:\s*[-–\/]\s*\$?[\d]+)?/);
+  // Match price patterns: $10, $10-$20, $10–$20, $10/$20, $10-20
+  const priceMatch = (event.details || '').match(/\$(\d+)(?:\s*[-–\/]\s*\$?(\d+))?/);
   if (priceMatch) {
-    // Normalize dashes to en-dash for display
-    return priceMatch[0].replace(/-/g, '–');
+    if (priceMatch[2]) {
+      // Two-value range: sort ascending, always add $ to both
+      const nums = [parseInt(priceMatch[1], 10), parseInt(priceMatch[2], 10)].sort((a, b) => a - b);
+      return `$${nums[0]}–$${nums[1]}`;
+    }
+    return `$${priceMatch[1]}`;
   }
 
   return null;
@@ -1239,12 +1415,11 @@ function generateHTML(eventsByDate, sortedDates) {
 
         /* Masthead */
         header {
-            border: 2px solid var(--acid-green);
-            padding: 30px;
-            margin-bottom: 60px;
+            border-bottom: 2px solid var(--acid-green);
+            padding: 30px 0;
+            margin-bottom: 40px;
             position: relative;
             animation: slideDown 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-            background: linear-gradient(135deg, rgba(204, 255, 0, 0.03) 0%, transparent 100%);
         }
 
         @keyframes slideDown {
@@ -1256,23 +1431,6 @@ function generateHTML(eventsByDate, sortedDates) {
                 opacity: 1;
                 transform: translateY(0);
             }
-        }
-
-        header::before {
-            content: '';
-            position: absolute;
-            top: -2px;
-            left: -2px;
-            right: -2px;
-            bottom: -2px;
-            background: linear-gradient(45deg, var(--acid-green), var(--electric-blue), var(--acid-green));
-            z-index: -1;
-            opacity: 0;
-            transition: opacity 0.3s;
-        }
-
-        header:hover::before {
-            opacity: 0.2;
         }
 
         h1 {
@@ -1359,7 +1517,7 @@ function generateHTML(eventsByDate, sortedDates) {
             font-family: 'Azeret Mono', monospace;
             font-size: 0.75rem;
             letter-spacing: 0.15em;
-            color: #666;
+            color: #999;
             text-transform: uppercase;
         }
 
@@ -1385,7 +1543,7 @@ function generateHTML(eventsByDate, sortedDates) {
             left: -100%;
             width: 100%;
             height: 100%;
-            background: var(--electric-blue);
+            background: var(--acid-green);
             transition: left 0.3s cubic-bezier(0.16, 1, 0.3, 1);
             z-index: -1;
         }
@@ -1398,7 +1556,7 @@ function generateHTML(eventsByDate, sortedDates) {
         .genre-chip:hover,
         .genre-chip.active {
             color: var(--deep-black);
-            border-color: var(--electric-blue);
+            border-color: var(--acid-green);
         }
 
         /* Events grid */
@@ -1440,8 +1598,6 @@ function generateHTML(eventsByDate, sortedDates) {
                         box-shadow 0.3s ease;
             cursor: pointer;
             animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) backwards;
-            content-visibility: auto;
-            contain-intrinsic-size: 0 180px;
         }
         .event-card:nth-child(1) { animation-delay: 0.05s; }
         .event-card:nth-child(2) { animation-delay: 0.08s; }
@@ -1528,6 +1684,10 @@ function generateHTML(eventsByDate, sortedDates) {
             text-transform: uppercase;
             padding-right: 60px;
             transition: color 0.2s;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
         }
 
         .event-card:hover .card-title {
@@ -1592,6 +1752,27 @@ function generateHTML(eventsByDate, sortedDates) {
             transform: scaleX(1);
         }
 
+        /* "GET TICKETS →" CTA — revealed on hover */
+        .card-cta {
+            display: block;
+            font-family: 'Azeret Mono', monospace;
+            font-size: 0.7rem;
+            letter-spacing: 0.14em;
+            color: var(--genre-accent);
+            text-transform: uppercase;
+            padding: 8px 18px;
+            background: color-mix(in srgb, var(--genre-accent) 8%, transparent);
+            border-top: 1px solid color-mix(in srgb, var(--genre-accent) 20%, transparent);
+            opacity: 0;
+            transform: translateY(4px);
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+
+        .event-card:hover .card-cta {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
         /* ═══════════════════════════════════════════════
            GRID — keep existing .events-grid but update minmax
            ═══════════════════════════════════════════════ */
@@ -1618,51 +1799,29 @@ function generateHTML(eventsByDate, sortedDates) {
             }
         }
 
-        /* Live indicator */
-        .live-indicator {
-            position: fixed;
-            bottom: 30px;
-            right: 30px;
-            background: var(--deep-black);
-            border: 1px solid var(--acid-green);
-            padding: 15px 25px;
+        /* Footer */
+        .site-footer {
+            border-top: 1px solid var(--concrete);
+            margin-top: 40px;
+            padding: 30px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
             font-family: 'Azeret Mono', monospace;
-            font-size: 0.85rem;
+            font-size: 0.72rem;
             letter-spacing: 0.1em;
-            z-index: 1000;
-            animation: slideUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) 1s backwards;
+            color: #555;
         }
 
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+        .site-footer a {
+            color: #777;
+            text-decoration: none;
         }
 
-        .live-dot {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            background: var(--acid-green);
-            border-radius: 50%;
-            margin-right: 10px;
-            animation: pulse 2s ease-in-out infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { 
-                opacity: 1;
-                transform: scale(1);
-            }
-            50% { 
-                opacity: 0.4;
-                transform: scale(1.2);
-            }
+        .site-footer a:hover {
+            color: var(--acid-green);
         }
 
         /* Scrollbar */
@@ -1691,13 +1850,6 @@ function generateHTML(eventsByDate, sortedDates) {
 
             h1 {
                 font-size: 3rem;
-            }
-
-            .live-indicator {
-                bottom: 15px;
-                right: 15px;
-                padding: 10px 15px;
-                font-size: 0.75rem;
             }
         }
     </style>
@@ -1733,11 +1885,11 @@ function generateHTML(eventsByDate, sortedDates) {
             <!--EVENT_CARDS_PLACEHOLDER-->
         </div>
         </main>
-    </div>
 
-    <div class="live-indicator">
-        <span class="live-dot"></span>
-        LIVE DATA
+        <footer class="site-footer">
+            <span>BAYMOVES.NOW — Bay Area Events, Updated Daily</span>
+            <span>Sources: 19hz · Foopee · Posh · Partiful</span>
+        </footer>
     </div>
 
     <script>
@@ -1887,8 +2039,8 @@ function generateHTML(eventsByDate, sortedDates) {
         const shareOnclick = `event.preventDefault();event.stopPropagation();shareEvent('${shareUrl}','${shareTitleJs}')`
           .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         const shareBtn = `<button class="share-btn" onclick="${shareOnclick}" title="Share">` +
-          `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>` +
-          `</button>`;
+          `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:5px"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>` +
+          `SHARE</button>`;
 
         const cardContent =
           // Genre color band — top edge
@@ -1906,19 +2058,21 @@ function generateHTML(eventsByDate, sortedDates) {
             : '') +
           `                  </div>\n` +
           `                  <h2 class="card-title">${escapeHtml(event.title)}</h2>\n` +
-          `                  <div class="card-venue-row">\n` +
-          `                    <span class="card-genre-dot"></span>\n` +
-          (event.venue
-            ? `                    <span class="card-venue">${escapeHtml(venueDisplay)}</span>\n`
+          (event.venue && event.venue.trim()
+            ? `                  <div class="card-venue-row">\n` +
+              `                    <span class="card-genre-dot"></span>\n` +
+              `                    <span class="card-venue">${escapeHtml(venueDisplay)}</span>\n` +
+              `                  </div>\n`
             : '') +
-          `                  </div>\n` +
           `                  ${shareBtn}\n` +
           `                </div>\n` +
+          // GET TICKETS CTA (only for cards with a link)
+          (event.link ? `                <div class="card-cta">Get Tickets →</div>\n` : '') +
           // Bottom accent line (animates on hover)
           `                <div class="card-hover-line"></div>\n`;
 
         const openWrap = event.link
-          ? `            <a href="${escapeHtml(event.link)}" target="_blank" rel="noopener noreferrer" class="event-card-link">\n`
+          ? `            <a href="${escapeHtml(event.link)}" target="_blank" rel="noopener noreferrer" class="event-card-link" title="Get tickets">\n`
           : '';
         const closeWrap = event.link ? `            </a>\n` : '';
 
