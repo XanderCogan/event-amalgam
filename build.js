@@ -5,16 +5,23 @@ const fs = require('fs');
 const puppeteer = require('puppeteer');
 const { classifyAllEvents } = require('./classify-events');
 
-// Shared 21+ detection helper (standardized across all sources)
-function is21Plus(text) {
-  const lower = text.toLowerCase();
-  return lower.includes('21+') ||
-         lower.includes('21 +') ||
-         lower.includes('+ 21') ||
-         lower.includes('21 and over') ||
-         lower.includes('21 & over') ||
-         lower.includes('21 & up') ||
-         lower.includes('(21+)');
+// Detect age restriction from text. Returns '21+', '18+', 'all-ages', or null (unknown).
+function detectAgeRestriction(text) {
+  const lower = (text || '').toLowerCase();
+  if (lower.includes('21+') || lower.includes('21 +') || lower.includes('+ 21') ||
+      lower.includes('21 and over') || lower.includes('21 & over') ||
+      lower.includes('21 & up') || lower.includes('(21+)') || lower.includes('21-and-over')) {
+    return '21+';
+  }
+  if (lower.includes('18+') || lower.includes('18 +') || lower.includes('18 and over') ||
+      lower.includes('18 & over') || lower.includes('18 & up') || lower.includes('(18+)') ||
+      lower.includes('18-and-over')) {
+    return '18+';
+  }
+  if (lower.includes('all ages') || lower.includes('all-ages') || lower.includes('allages')) {
+    return 'all-ages';
+  }
+  return null;
 }
 
 // Fetch HTML from a URL
@@ -248,11 +255,9 @@ function parse19hz(html) {
       const organizers = $(cells[4]).text().trim();
       const links = $(cells[5]).text().trim();
       
-      // Filter: exclude 21+ events
-      if (is21Plus(priceAge)) {
-        return;
-      }
-      
+      // Detect age restriction (do NOT filter — show all with a badge)
+      const ageRestriction = detectAgeRestriction(priceAge);
+
       // Filter: exclude out-of-area events
       if (eventTitleVenue.includes('(Sacramento)')) return;
       if (eventTitleVenue.includes('(Nevada City)')) return;
@@ -306,7 +311,8 @@ function parse19hz(html) {
           city,
           details: `${priceAge}${tags ? ' | ' + tags : ''}`,
           bands: [],
-          link: null
+          link: null,
+          ageRestriction,
         });
       } else {
         // Try to expand recurring event patterns like "Mondays", "2nd Fridays"
@@ -323,7 +329,8 @@ function parse19hz(html) {
               city,
               details: `${priceAge}${tags ? ' | ' + tags : ''}`,
               bands: [],
-              link: null
+              link: null,
+              ageRestriction,
             });
           }
         } else {
@@ -404,12 +411,10 @@ $('body > ul > li, body > ol > li').each((i, item) => {
       // Get all text content - this is a continuous string format
       // Example: "Black Cat, S.F. Jezebel: Rewritten 21+ $30 6pm/7pm til 9pm"
       const fullText = $eventItem.text().trim();
-      
-      // Filter: exclude 21+ events
-      if (is21Plus(fullText)) {
-        return;
-      }
-      
+
+      // Detect age restriction (do NOT filter — show all with a badge)
+      const ageRestriction = detectAgeRestriction(fullText);
+
       // Extract venue and city from first link (format: "Black Cat, S.F." or "Venue Name, City")
       const venueFull = $(links[0]).text().trim();
       let venue = venueFull;
@@ -483,7 +488,8 @@ $('body > ul > li, body > ol > li').each((i, item) => {
           city,
           details,
           bands,
-          link: null
+          link: null,
+          ageRestriction,
         });
       } else {
         console.log(`    ⚠️ Foopee: Skipped (missing ${!date ? 'date' : 'venue'})`);
@@ -573,11 +579,8 @@ async function scrapePoshVip() {
       const displayHours = hours % 12 || 12;
       const time = normalizeTime(`${displayHours}:${String(minutes).padStart(2, '0')} ${ampm}`);
       
-      const fullText = `${event.name} ${event.venue?.name || ''} ${event.description || ''}`.toLowerCase();
-      if (is21Plus(fullText)) {
-        continue;
-      }
-      
+      const ageRestriction = detectAgeRestriction(`${event.name} ${event.venue?.name || ''} ${event.description || ''}`);
+
       formattedEvents.push({
         date,
         time,
@@ -587,16 +590,97 @@ async function scrapePoshVip() {
         city: 'San Francisco',
         details: '',
         bands: [],
-        link: `https://posh.vip/e/${event.url}`
+        link: `https://posh.vip/e/${event.url}`,
+        ageRestriction,
       });
     }
     
     console.log(`Parsed ${formattedEvents.length} events from posh.vip`);
     return formattedEvents;
-    
+
   } catch (error) {
     console.error('Error scraping posh.vip:', error.message);
     return [];
+  }
+}
+
+// Fetch age restrictions for Posh events by rendering individual event pages.
+// Results are cached in .posh-age-cache.json so each page is only loaded once.
+const POSH_AGE_CACHE_FILE = '.posh-age-cache.json';
+const POSH_AGE_CONCURRENCY = 5;
+
+async function fetchPoshEventAges(poshEvents) {
+  const eventsNeedingAge = poshEvents.filter(e => e.ageRestriction === null && e.link);
+  if (eventsNeedingAge.length === 0) return;
+
+  let cache = {};
+  try {
+    if (fs.existsSync(POSH_AGE_CACHE_FILE)) {
+      cache = JSON.parse(fs.readFileSync(POSH_AGE_CACHE_FILE, 'utf-8'));
+    }
+  } catch (e) {
+    console.log('Posh age cache corrupted, starting fresh');
+  }
+
+  const uncached = eventsNeedingAge.filter(e => !(e.link in cache));
+  console.log(`Posh age: ${eventsNeedingAge.length - uncached.length} cached, ${uncached.length} need page fetch`);
+
+  if (uncached.length > 0) {
+    const totalBatches = Math.ceil(uncached.length / POSH_AGE_CONCURRENCY);
+    let browser;
+    try {
+      browser = await puppeteer.launch({
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      });
+
+      for (let i = 0; i < uncached.length; i += POSH_AGE_CONCURRENCY) {
+        const batch = uncached.slice(i, i + POSH_AGE_CONCURRENCY);
+        const batchNum = Math.floor(i / POSH_AGE_CONCURRENCY) + 1;
+        console.log(`  Posh age: batch ${batchNum}/${totalBatches} (${batch.length} pages)...`);
+
+        const results = await Promise.all(batch.map(async (event) => {
+          const page = await browser.newPage();
+          try {
+            await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+            page.setDefaultNavigationTimeout(30000);
+            await page.goto(event.link, { waitUntil: 'domcontentloaded' });
+            // Poll until page has rendered enough content (React hydration)
+            let bodyText = '';
+            for (let attempt = 0; attempt < 14; attempt++) {
+              await sleep(500);
+              bodyText = await page.evaluate(() => document.body.innerText);
+              if (bodyText.includes('About this event') || bodyText.includes('Location') || bodyText.length > 800) break;
+            }
+            return { link: event.link, title: event.title, detected: detectAgeRestriction(bodyText) };
+          } catch (err) {
+            console.log(`    ⚠️  ${event.title}: ${err.message.split('\n')[0]}`);
+            return { link: event.link, title: event.title, detected: null };
+          } finally {
+            await page.close().catch(() => {});
+          }
+        }));
+
+        for (const { link, title, detected } of results) {
+          if (detected !== null) {
+            console.log(`    ${title}: ${detected}`);
+          }
+          cache[link] = detected || 'none'; // 'none' = checked, no age restriction found
+        }
+      }
+    } finally {
+      if (browser) await browser.close().catch(() => {});
+    }
+    fs.writeFileSync(POSH_AGE_CACHE_FILE, JSON.stringify(cache, null, 2));
+    const detected = Object.values(cache).filter(v => v !== 'none').length;
+    console.log(`Posh age: done. ${detected} age restrictions found, ${Object.keys(cache).length - detected} unknown.`);
+  }
+
+  // Apply cached ages back to the event objects ('none' sentinel → null)
+  for (const event of eventsNeedingAge) {
+    if (event.link in cache) {
+      event.ageRestriction = cache[event.link] === 'none' ? null : cache[event.link];
+    }
   }
 }
 
@@ -670,7 +754,7 @@ async function parsePartiful() {
       const cityStr = (e.locationInfo?.mapsInfo?.approximateLocation || addressLines[addressLines.length - 1] || '').toString().toLowerCase();
       const fullText = `${title} ${venue} ${e.description || ''}`.toLowerCase();
 
-      if (is21Plus(fullText)) continue;
+      const ageRestriction = detectAgeRestriction(`${title} ${venue} ${e.description || ''}`);
       const inBayArea = bayAreaCities.some(c => cityStr.includes(c) || fullText.includes(c));
       if (!inBayArea) continue;
       if (['nevada city', 'sacramento', 'nevada'].some(c => cityStr.startsWith(c))) continue;
@@ -706,7 +790,8 @@ async function parsePartiful() {
         details,
         bands: [],
         link,
-        category
+        category,
+        ageRestriction,
       });
     }
 
@@ -783,15 +868,19 @@ async function parsePoshVip() {
             return;
           }
 
+          let ageRestriction = null;
           if (allText.includes('21+') || allText.includes('21 +') || allText.includes('21 and over')) {
-            return;
+            ageRestriction = '21+';
+          } else if (allText.includes('18+') || allText.includes('18 and over') || allText.includes('all ages')) {
+            ageRestriction = allText.includes('all ages') ? 'all-ages' : '18+';
           }
 
           results.push({
             title,
             dateText,
             venue,
-            link
+            link,
+            ageRestriction,
           });
         } catch (err) {
           console.error(`Error parsing event ${index}:`, err.message);
@@ -832,7 +921,8 @@ async function parsePoshVip() {
           city: 'San Francisco',
           details: '',
           bands: [],
-          link: event.link || null
+          link: event.link || null,
+          ageRestriction: event.ageRestriction || null,
         });
       } catch (err) {
         console.error(`Error formatting event ${index}:`, err.message);
@@ -939,8 +1029,7 @@ async function scrapeEventbrite() {
           const title = ev.name?.text || '';
           if (!title) continue;
 
-          const fullText = `${title} ${ev.description?.text || ''}`.toLowerCase();
-          if (is21Plus(fullText)) continue;
+          const ageRestriction = detectAgeRestriction(`${title} ${ev.description?.text || ''}`);
 
           const startRaw = ev.start?.local || '';
           if (!startRaw) continue;
@@ -970,6 +1059,7 @@ async function scrapeEventbrite() {
             date, time, source: 'eventbrite', title,
             venue: venueName, city, details, bands: [],
             link: ev.url || '',
+            ageRestriction,
           });
         }
       } catch (err) {
@@ -1007,6 +1097,10 @@ async function build() {
   // Fetch posh.vip events (API-based, no Puppeteer)
   const poshEvents = await scrapePoshVip();
   console.log(`Parsed ${poshEvents.length} events from posh.vip`);
+
+  // Fetch age restrictions from individual Posh event pages (cached)
+  console.log('Fetching Posh event ages...');
+  await fetchPoshEventAges(poshEvents);
 
   // Fetch Partiful events (graceful if API unavailable)
   console.log('Fetching events from Partiful...');
@@ -1559,6 +1653,44 @@ function generateHTML(eventsByDate, sortedDates) {
             border-color: var(--acid-green);
         }
 
+        .age-chip {
+            font-family: 'Azeret Mono', monospace;
+            background: transparent;
+            border: 1px solid var(--concrete);
+            color: var(--white);
+            padding: 6px 14px;
+            cursor: pointer;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.08em;
+            transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .age-chip::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: var(--acid-green);
+            transition: left 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: -1;
+        }
+
+        .age-chip:hover::before,
+        .age-chip.active::before {
+            left: 0;
+        }
+
+        .age-chip:hover,
+        .age-chip.active {
+            color: var(--deep-black);
+            border-color: var(--acid-green);
+        }
+
         /* Events grid */
         .no-events,
         .no-events-filtered {
@@ -1739,6 +1871,39 @@ function generateHTML(eventsByDate, sortedDates) {
             color: var(--acid-green);
         }
 
+        /* --- Age restriction badge --- */
+        .card-age {
+            font-family: 'Azeret Mono', monospace;
+            font-size: 0.62rem;
+            letter-spacing: 0.08em;
+            padding: 2px 7px;
+            text-transform: uppercase;
+            margin-left: auto;
+            border: 1px solid;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        .card-age--21plus {
+            color: #ff4444;
+            border-color: rgba(255, 68, 68, 0.35);
+            background: rgba(255, 68, 68, 0.08);
+        }
+        .card-age--18plus {
+            color: #ff9900;
+            border-color: rgba(255, 153, 0, 0.35);
+            background: rgba(255, 153, 0, 0.08);
+        }
+        .card-age--all-ages {
+            color: #ccff00;
+            border-color: rgba(204, 255, 0, 0.3);
+            background: rgba(204, 255, 0, 0.06);
+        }
+        .card-age--unknown {
+            color: #444;
+            border-color: rgba(255, 255, 255, 0.08);
+            background: transparent;
+        }
+
         /* --- Bottom hover line --- */
         .card-hover-line {
             height: 2px;
@@ -1880,6 +2045,13 @@ function generateHTML(eventsByDate, sortedDates) {
             <button class="genre-chip" data-genre-filter="misc">Misc</button>
         </div>
 
+        <!-- Age filter -->
+        <div class="genre-filters" style="margin-top:-24px;">
+            <span class="genre-label">AGE:</span>
+            <button class="age-chip active" data-age-filter="all">All</button>
+            <button class="age-chip" data-age-filter="under21">Under 21 OK</button>
+        </div>
+
         <div class="events-grid" id="eventsGrid">
             <div class="no-events-filtered" id="noEventsFiltered" style="display: none;">No events found</div>
             <!--EVENT_CARDS_PLACEHOLDER-->
@@ -1960,15 +2132,23 @@ function generateHTML(eventsByDate, sortedDates) {
                 return genres.indexOf(genreFilter.toLowerCase()) !== -1;
             }
 
+            function matchesAge(card, ageFilter) {
+                if (ageFilter === 'all') return true;
+                if (ageFilter === 'under21') return (card.dataset.age || 'unknown') !== '21+';
+                return true;
+            }
+
             function applyFilters() {
                 var timeFilter = document.querySelector('.filter-btn.active[data-time-filter]');
                 var genreFilter = document.querySelector('.genre-chip.active');
+                var ageFilter = document.querySelector('.age-chip.active');
                 var timeVal = timeFilter ? timeFilter.dataset.timeFilter : 'all';
                 var genreVal = genreFilter ? genreFilter.dataset.genreFilter : 'all';
+                var ageVal = ageFilter ? ageFilter.dataset.ageFilter : 'all';
 
                 var visibleCount = 0;
                 eventCards.forEach(function(card) {
-                    var show = matchesTime(card, timeVal) && matchesGenre(card, genreVal);
+                    var show = matchesTime(card, timeVal) && matchesGenre(card, genreVal) && matchesAge(card, ageVal);
                     if (show) visibleCount++;
                     var el = card.closest('.event-card-link') || card;
                     el.style.display = show ? 'block' : 'none';
@@ -1996,6 +2176,15 @@ function generateHTML(eventsByDate, sortedDates) {
             genreChipBtns.forEach(function(btn) {
                 btn.addEventListener('click', function() {
                     genreChipBtns.forEach(function(b) { b.classList.remove('active'); });
+                    btn.classList.add('active');
+                    applyFilters();
+                });
+            });
+
+            const ageChipBtns = document.querySelectorAll('.age-chip');
+            ageChipBtns.forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    ageChipBtns.forEach(function(b) { b.classList.remove('active'); });
                     btn.classList.add('active');
                     applyFilters();
                 });
@@ -2033,6 +2222,15 @@ function generateHTML(eventsByDate, sortedDates) {
         const price = extractPrice(event);
         const isFree = price === 'FREE';
 
+        const age = event.ageRestriction;
+        const ageBadge = age === '21+'
+          ? `<span class="card-age card-age--21plus">21+</span>`
+          : age === '18+'
+          ? `<span class="card-age card-age--18plus">18+</span>`
+          : age === 'all-ages'
+          ? `<span class="card-age card-age--all-ages">All Ages</span>`
+          : `<span class="card-age card-age--unknown">Age ?</span>`;
+
         const slug = generateSlug(event);
         const shareUrl = `https://baymoves.com/e/${slug}`;
         const shareTitleJs = (event.title || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -2056,6 +2254,7 @@ function generateHTML(eventsByDate, sortedDates) {
           (event.time
             ? `                    <span class="card-time">${escapeHtml(event.time)}</span>\n`
             : '') +
+          `                    ${ageBadge}\n` +
           `                  </div>\n` +
           `                  <h2 class="card-title">${escapeHtml(event.title)}</h2>\n` +
           (event.venue && event.venue.trim()
@@ -2077,7 +2276,7 @@ function generateHTML(eventsByDate, sortedDates) {
         const closeWrap = event.link ? `            </a>\n` : '';
 
         cardsHtml += openWrap +
-          `            <div class="event-card" data-genres="${escapeHtml(genres)}" data-primary-genre="${primaryGenre}" data-event-date="${date}">\n` +
+          `            <div class="event-card" data-genres="${escapeHtml(genres)}" data-primary-genre="${primaryGenre}" data-event-date="${date}" data-age="${age || 'unknown'}">\n` +
           cardContent +
           `            </div>\n` +
           closeWrap + '\n';
